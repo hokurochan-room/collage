@@ -1,0 +1,52 @@
+<!-- お問合せポップアップ -->
+
+<!-- contact.html -->
+<form id="contact-form" class="flex flex-col gap-4">
+
+  <h2 class="font-bold text-lg mb-2 text-pink-600">お問い合わせフォーム</h2>
+
+  <!-- ニックネーム（任意） -->
+  <label class="flex flex-col text-sm text-gray-700">
+    ニックネーム（任意）
+    <input
+      type="text"
+      name="nickname"
+      maxlength="100"
+      class="border border-gray-300 rounded px-2 py-1 mt-1"
+    />
+  </label>
+  </label>
+
+  <!-- メールアドレス（返信希望なら必須） -->
+  <label class="flex flex-col text-sm text-gray-700">
+    メールアドレス（返信希望の場合必須）
+    <input
+      type="email"
+      name="email"
+      maxlength="100"
+      class="border border-gray-300 rounded px-2 py-1 mt-1"
+    />
+  </label>
+
+  <!-- お問い合わせ内容（必須） -->
+  <label class="flex flex-col text-sm text-gray-700">
+    お問い合わせ内容（必須、1000文字以内）
+    <textarea
+      name="message"
+      required
+      maxlength="1000"
+      class="border border-gray-300 rounded px-2 py-1 mt-1 h-40"
+    ></textarea>
+  </label>
+
+  <!-- 送信ボタン -->
+  <div class="flex justify-center mt-4">
+    <button
+      type="submit"
+      class="bg-pink-300 text-white px-4 py-2 rounded-lg shadow hover:bg-pink-400 transition"
+    >
+      送信
+    </button>
+  </div>
+
+</form>
