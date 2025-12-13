@@ -1,4 +1,4 @@
-"use client";  //このコンポーネントはブラウザで動かすよ宣言
+"use client";  //このコンポーネントはブラウザで動かすの意味
 
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { motion } from "framer-motion";
