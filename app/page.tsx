@@ -715,7 +715,6 @@ export default function AppBase() {
 
   const [canvasName, setCanvasName] = useState<keyof typeof canvasSettings>("トレカ"); // 型推論付き
   const size = canvasSettings[canvasName];
-
   
   //キャンパス拡大
   const [zoom, setZoom] = useState(1); // 1 = 100%
@@ -824,7 +823,6 @@ export default function AppBase() {
 
   //レイヤー管理配列
   const [items, setItems] = useState<CanvasItem[]>([]);
-
   //レイヤー
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   //レイヤー並び替え用関数
@@ -872,10 +870,26 @@ export default function AppBase() {
   const handleAddText = (settings: TextSettings) => {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    ctx.font = `${textSettings.fontSize}px ${textSettings.font}`;
 
-    const textWidth = ctx.measureText(settings.text).width;
-    const textHeight = settings.fontSize; // フォントサイズを高さとみなす
+    // 太字対応
+    const fontWeight = settings.bold ? "bold" : "normal";
+    ctx.font = `${fontWeight} ${settings.fontSize}px ${settings.font}`;
+
+    // 行ごとに分割
+    const lines = settings.text.split("\n");
+
+    // 行間（1.3 にすると絶対かぶらない）
+    const lineHeight = settings.fontSize * 1.3;
+
+    // 最大幅
+    let maxWidth = 0;
+    lines.forEach((line) => {
+      const w = ctx.measureText(line).width;
+      if (w > maxWidth) maxWidth = w;
+    });
+
+    // 高さ = 行数 × 行間
+    const textHeight = lines.length * lineHeight;
 
     const newText: TextItem = {
       id: crypto.randomUUID(),
@@ -889,7 +903,7 @@ export default function AppBase() {
       bold: settings.bold,
       writingMode: settings.writingMode,
       align: settings.align,
-      width: textWidth,
+      width: maxWidth,
       height: textHeight,
     };
 
@@ -929,27 +943,42 @@ export default function AppBase() {
 
   const getCanvasPos = (
     canvas: HTMLCanvasElement,
-    e: React.MouseEvent
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>,
+    zoom: number
   ) => {
     const rect = canvas.getBoundingClientRect();
 
-    // スケールを計算（CSSと実サイズの比率）
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
+    // rect の値は scale(zoom) の影響を受けているので補正
+    const displayWidth = rect.width / zoom;
+    const displayHeight = rect.height / zoom;
+
+    const scaleX = canvas.width / displayWidth;
+    const scaleY = canvas.height / displayHeight;
+
+    // 座標取得（touch + mouse 両方対応）
+    let clientX: number;
+    let clientY: number;
+
+    if ("touches" in e) {
+      const touch = e.touches[0] ?? e.changedTouches[0];
+      clientX = touch.clientX;
+      clientY = touch.clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
 
     return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
     };
   };
-
   const [currentMode, setCurrentMode] =
     useState<"move" | "resize" | "rotate" | null>(null);
 
   //回転用の ref
   const startAngleRef = useRef(0);
   const originalRotationRef = useRef(0);
-  
   
   //複製処理関数
   const duplicateItem = (id: string) => {
@@ -972,20 +1001,59 @@ export default function AppBase() {
   const startYRef = useRef(0);
   const startWidthRef = useRef(0);
   const startHeightRef = useRef(0);
-
   const startLocalXRef = useRef(0);
   const startLocalYRef = useRef(0);
 
+  // ★ window用（ブラウザ生イベントに使う）
+  const handleWindowPointerUp = () => {
+    setIsDragging(false);
+    setResizingHandle(null);
+    setCurrentMode(null);
+
+    startXRef.current = 0;
+    startYRef.current = 0;
+    startWidthRef.current = 0;
+    startHeightRef.current = 0;
+    startLocalXRef.current = 0;
+    startLocalYRef.current = 0;
+
+    setDragOffsetLocal(null);
+
+    window.removeEventListener("mouseup", handleWindowPointerUp);
+    window.removeEventListener("touchend", handleWindowPointerUp);
+  };
+
+  //画面サイズ判定
+  const [isMobile, setIsMobile] = useState(false);
+
+  //回転、複製、削除、拡大縮小ハンドル
+  const HANDLE_OFFSET = isMobile ? 70 : 40;
+  //const HANDLE_Y_OFFSET = isMobile ? 70 : 40;
+  const　HANDLE_SIZE　= HANDLE_OFFSET / 4
+
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth < 640); // sm未満をスマホとする
+    checkMobile(); // 初回判定
+
+    window.addEventListener("resize", checkMobile); // リサイズ時も判定
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
   //アイテムをクリックしたら選択する関数
-  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    
+  const handleCanvasMouseDown = (
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
+  ) => {
+    e.preventDefault();
+
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
       
     setIsDragging(true);
-    window.addEventListener("mouseup", handleCanvasMouseUp);
+     // window には純粋なブラウザイベント専用の関数を渡す
+    window.addEventListener("mouseup", handleWindowMouseUp);
+    window.addEventListener("touchend", handleWindowMouseUp);
 
-    const { x: mouseX, y: mouseY } = getCanvasPos(canvas, e);
+    const { x: mouseX, y: mouseY } = getCanvasPos(canvas, e, zoom);
     const item = items.find(i => i.id === selectedId);
 
     // ====== 1) 回転ハンドル ======
@@ -1026,11 +1094,11 @@ export default function AppBase() {
 
     // ====== ★ × 削除ボタン判定（回転対応） ======
     if (item) {
-      const deleteSize = 20;
+      const deleteSize = HANDLE_OFFSET;
 
       // 回転ノブの右隣（描画と同じ座標にする）
-      const deleteX = item.x + item.width / 2 + 30;
-      const deleteY = item.y - 30;
+      const deleteX = item.x + item.width / 2 + 40 + HANDLE_OFFSET;
+      const deleteY = item.y - HANDLE_OFFSET;
 
       // マウス座標を回転前に戻す
       const cx = item.x + item.width / 2;
@@ -1058,11 +1126,11 @@ export default function AppBase() {
 
     // ====== ★ 複製ボタン判定（回転対応） ======
     if (item) {
-      const duplicateHitSize = 36;
+      const duplicateHitSize = HANDLE_OFFSET;
 
       // 回転ノブの左隣（描画と同じ座標）
-      const duplicateX = item.x + item.width / 2 - 30;
-      const duplicateY = item.y - 30;
+      const duplicateX = item.x + item.width / 2 - 40 - HANDLE_OFFSET;
+      const duplicateY = item.y - HANDLE_OFFSET;
 
       // マウス座標を回転前に戻す（削除と同じ処理）
       const cx = item.x + item.width / 2;
@@ -1086,7 +1154,7 @@ export default function AppBase() {
       }
     }
 
-  // ====== 3) 通常のアイテム選択 → move ======
+    // ====== 3) 通常のアイテム選択 → move ======
     for (let i = items.length - 1; i >= 0; i--) {
       const target = items[i];
       if (isPointInRotatedRect(mouseX, mouseY, target)) {
@@ -1112,13 +1180,17 @@ export default function AppBase() {
   };
 
   //ドラッグ中に位置を更新する
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseMove = (
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
+  ) => {
+    e.preventDefault();
+
     if (!selectedId) return;
 
-    const canvas = canvasRef.current;
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
-    const { x: mouseX, y: mouseY } = getCanvasPos(canvas, e);
+    const { x: mouseX, y: mouseY } = getCanvasPos(canvas, e, zoom);
     const active = items.find(i => i.id === selectedId);
     if (!active) return;
 
@@ -1205,7 +1277,15 @@ export default function AppBase() {
   };
 
   //マウスを離したらドラック終了
-  const handleCanvasMouseUp = () => {
+  const handleWindowMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const handleCanvasMouseUp = (
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
+  ) => {
+    e.preventDefault();
+
     setIsDragging(false);
     setResizingHandle(null);
     setCurrentMode(null);
@@ -1220,12 +1300,15 @@ export default function AppBase() {
 
     setDragOffsetLocal(null);
       
-    setIsDragging(false);
-    window.removeEventListener("mouseup", handleCanvasMouseUp);
+    window.removeEventListener("mouseup", handleWindowPointerUp);
+    window.removeEventListener("touchend", handleWindowPointerUp);
   };
 
-  //拡大、縮小ノブ
-  const HANDLE_SIZE = 8;
+
+
+  const [resizeDirX, setResizeDirX] = useState<"l" | "r" | null>(null);
+  const [resizeDirY, setResizeDirY] = useState<"t" | "b" | null>(null);
+  const [, setResizingHandle] = useState<"tl"|"tr"|"bl"|"br"|null>(null);
 
   // 選択中アイテムの拡大縮小ノブを描画
   const drawResizeHandles = (ctx: CanvasRenderingContext2D, item: CanvasItem) => {
@@ -1249,14 +1332,7 @@ export default function AppBase() {
       ctx.stroke();
     });
   };
-
-  const [resizeDirX, setResizeDirX] = useState<"l" | "r" | null>(null);
-  const [resizeDirY, setResizeDirY] = useState<"t" | "b" | null>(null);
-  const [, setResizingHandle] = useState<"tl"|"tr"|"bl"|"br"|null>(null);
-
-  //回転ハンドル
-  const ROTATE_HANDLE_OFFSET = 30;
-
+  
   //回転描画関数
   const drawRotateHandle = (ctx: CanvasRenderingContext2D, item: CanvasItem) => {
     const cx = item.x + item.width / 2;
@@ -1264,12 +1340,50 @@ export default function AppBase() {
 
     // ここはもう回転済みの空間なので rotate はしない！
     const handleX = cx;
-    const handleY = cy - (item.height / 2 + ROTATE_HANDLE_OFFSET);
+    const handleY = cy - (item.height / 2 + HANDLE_OFFSET);
 
     ctx.beginPath();
-    ctx.arc(handleX, handleY, HANDLE_SIZE, 0, Math.PI * 2);
+    ctx.arc(handleX, handleY, HANDLE_OFFSET / 2, 0, Math.PI * 2);
     ctx.fillStyle = "#00aaff";
     ctx.fill();
+  };
+
+  //複製描画関数
+  const drawCopyHandle = (ctx: CanvasRenderingContext2D, item: CanvasItem) => {
+    // ======== 複製ボタン（＋）を描画 ========
+        //const duplicateVisualSize = 20;
+
+        // 🔽 回転ノブの「左隣」に配置
+        const duplicateX = item.x + item.width / 2 - 40 - HANDLE_OFFSET;
+        const duplicateY = item.y - HANDLE_OFFSET;
+
+        ctx.fillStyle = "rgba(34, 197, 94, 0.9)"; // 緑
+        ctx.beginPath();
+        ctx.arc(duplicateX, duplicateY, HANDLE_OFFSET / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#fff";
+        ctx.font = `${HANDLE_OFFSET - 10}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("+", duplicateX, duplicateY);
+  };
+
+  //削除描画関数
+  const drawDeleteHandle = (ctx: CanvasRenderingContext2D, item: CanvasItem) => {
+        const deleteX = item.x + item.width / 2 + 40 + HANDLE_OFFSET;
+        const deleteY = item.y - HANDLE_OFFSET;
+
+        ctx.fillStyle = "rgba(220, 38, 38, 0.9)";
+        ctx.beginPath();
+        ctx.arc(deleteX, deleteY, HANDLE_OFFSET / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#fff";
+        ctx.font = `${HANDLE_OFFSET - 10}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("×", deleteX, deleteY);
   };
 
   const getRotateHandleUnderCursor = (
@@ -1282,18 +1396,12 @@ export default function AppBase() {
     const rad = item.rotation ?? 0;
 
     const rawX = item.x + item.width / 2;
-    const rawY = item.y - ROTATE_HANDLE_OFFSET;
+    const rawY = item.y - HANDLE_OFFSET;
 
     const pos = rotatePoint(rawX, rawY, cx, cy, rad);
 
     const dist = Math.hypot(mouseX - pos.x, mouseY - pos.y);
-    return dist <= HANDLE_SIZE + 2;
-  };
-
-  const deleteSelectedItem = () => {
-    if (!selectedId) return;
-    setItems((prev) => prev.filter((item) => item.id !== selectedId));
-    setSelectedId(null);
+    return dist <= HANDLE_SIZE + HANDLE_OFFSET;
   };
 
   const [dragOffsetLocal, setDragOffsetLocal] = useState<{ x: number; y: number } | null>(null);
@@ -1341,6 +1449,13 @@ export default function AppBase() {
     createdAt: number;
   };
 
+    const MAX_SAVE_COUNT = 10; 
+    type StoredCanvas = {
+    id: string;
+    items: CanvasItem[];
+    size: { w: number; h: number };
+    createdAt: number;
+  };
   const [savedList, setSavedList] = useState<SavedCanvas[]>([]);
   const [selectedPreview, setSelectedPreview] = useState<any | null>(null);
 
@@ -1358,7 +1473,7 @@ export default function AppBase() {
 
   //デバイスに画像を保存
   const handleDownloadImage = () => {
-    const canvas = canvasRef.current;
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
     // ✅ 今の選択状態を一時保存
@@ -1385,17 +1500,15 @@ export default function AppBase() {
   const [popup, setPopup] = useState<"guide" | "terms" | "instagram" | null>(null);
   const [guideContent, setGuideContent] = useState("");   //ポップアップウィンドウステータス　使い方ガイド
   const [termsContent, setTermsContent] = useState("");   //ポップアップウィンドウステータス　利用規約　
+  
+  //スマホUI用
+  const footerHeight = 150; // フッターの高さ(px)
+  const navHeight = 40;     // ナビの高さ(px)
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Delete" || e.key === "Backspace") {
-        deleteSelectedItem();
-      }
-    };
+  //refをPCとスマホで分ける
+  const pcCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const spCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedId]);
 
   useEffect(() => {
     items.forEach(item => {
@@ -1409,6 +1522,7 @@ export default function AppBase() {
     });
   }, [items]);
 
+  
   useEffect(() => {
     // ============================
     // 1) 画像キャッシュ
@@ -1426,7 +1540,7 @@ export default function AppBase() {
     // ============================
     // 2) Canvas 描画処理
     // ============================
-    const canvas = canvasRef.current;
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext("2d");
@@ -1441,20 +1555,23 @@ export default function AppBase() {
     items.forEach(item => {
       // 文字描画
       if (item.type === "text") {
-        ctx.fillStyle = item.color;
-        ctx.font = `${textSettings.fontSize}px ${textSettings.font}`;
-        // ========= 回転開始 =========
         ctx.save();
+
+        ctx.fillStyle = item.color;
+        ctx.font = `${item.fontSize}px ${item.font}`;
+        ctx.textBaseline = "top";
+
+        // 回転中心：A版と同じでOK
         const cx = item.x + item.width / 2;
         const cy = item.y + item.height / 2;
+
         ctx.translate(cx, cy);
         ctx.rotate(item.rotation ?? 0);
         ctx.translate(-cx, -cy);
+        const lineHeight = item.fontSize * 1.3;
 
-        // ★ 回転させた状態でテキスト描画
-        drawMultilineText(ctx, item.text, item.x, item.y, 32, item);
+        drawMultilineText(ctx, item.text, item.x, item.y, lineHeight, item);
 
-        // ========= 回転終了 =========
         ctx.restore();
       }
 
@@ -1469,7 +1586,6 @@ export default function AppBase() {
           ctx.translate(cx, cy);
           ctx.rotate(item.rotation ?? 0);
           ctx.translate(-cx, -cy);
-
 
           // ★ 回転させた状態で画像描画
           ctx.drawImage(img, item.x, item.y, item.width, item.height);
@@ -1504,47 +1620,16 @@ export default function AppBase() {
           drawResizeHandles(ctx, item);
         }
         drawRotateHandle(ctx, item);
+        drawCopyHandle(ctx, item);
+        drawDeleteHandle(ctx, item);
 
-        // ======== 複製ボタン（＋）を描画 ========
-        const duplicateVisualSize = 20;
-
-        // 🔽 回転ノブの「左隣」に配置
-        const duplicateX = item.x + item.width / 2 - 40;
-        const duplicateY = item.y - 30;
-
-        ctx.fillStyle = "rgba(34, 197, 94, 0.9)"; // 緑
-        ctx.beginPath();
-        ctx.arc(duplicateX, duplicateY, duplicateVisualSize / 2, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = "#fff";
-        ctx.font = "14px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("+", duplicateX, duplicateY);
-
-        // ======== 削除ボタン（×）を描画 ========
-        const deleteVisualSize = 20; // 見た目の大きさ（今のまま）
-        const deleteX = item.x + item.width / 2 + 40;
-        const deleteY = item.y - 30;
-
-        ctx.fillStyle = "rgba(220, 38, 38, 0.9)";
-        ctx.beginPath();
-        ctx.arc(deleteX, deleteY, deleteVisualSize / 2, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = "#fff";
-        ctx.font = "14px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("×", deleteX, deleteY);
+        
 
         // ========= 回転終了 =========
         ctx.restore();
         }
       });
-
-  }, [items, size, selectedId, size.w, size.h]);
+  }, [items, size.w, size.h, selectedId]);
 
   useEffect(() => {
     // =========================
@@ -1571,9 +1656,7 @@ export default function AppBase() {
       setSelectedCategory(categories[0].id); 
       setSelectedMaterial(null);
     }
-
   }, [activePanel]);
-
 
   useEffect(() => {
     const handleWindowMouseUp = () => {
@@ -1643,11 +1726,11 @@ export default function AppBase() {
   }, [items]);
 
   useEffect(() => {
-  const data = localStorage.getItem("savedCanvasList");
-  if (data) {
-    setSavedList(JSON.parse(data));
-  }
-}, []);
+    const data = localStorage.getItem("savedCanvasList");
+    if (data) {
+      setSavedList(JSON.parse(data));
+    }
+  }, []);
 
   //ロード時に復元
   useEffect(() => {
@@ -1657,7 +1740,7 @@ export default function AppBase() {
     }
   }, []);
 
-//キャンパスサイズ手動設定範囲制限アラーム
+  //キャンパスサイズ手動設定範囲制限アラーム
   function handleManualApply() {
     if (!manualWidth || !manualHeight) {
       alert("縦と横の両方を入力してください！");
@@ -1668,7 +1751,7 @@ export default function AppBase() {
       return;
     }
 
-    const canvas = canvasRef.current;
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
     canvas.width = manualWidth;
@@ -1682,7 +1765,7 @@ export default function AppBase() {
     const img = new Image();
     img.src = imgSrc;
     img.onload = () => {
-      const canvas = canvasRef.current;
+      const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
       if (!canvas) return;
 
       const x = (canvas.width - img.width) / 2;
@@ -1723,7 +1806,7 @@ export default function AppBase() {
   function drawColoredMaterialOnCanvas(material?: MaterialItem, rgb?: RGB) {
     if (!material || !material.layers?.line || !material.layers?.fill || !rgb) return;
 
-    const canvas = canvasRef.current;
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
     const tempCanvas = document.createElement("canvas");
@@ -1837,19 +1920,20 @@ export default function AppBase() {
     });
   }
 
+  //ノブのあたり判定
   function getHandleUnderCursor(mouseX: number, mouseY: number, item: CanvasItem) {
     const handles = getHandlePositions(item);
 
     for (const h of handles) {
       const dist = Math.hypot(mouseX - h.x, mouseY - h.y);
-      if (dist < HANDLE_SIZE + 4) {
+      if (dist < HANDLE_SIZE + 24) {
         return h.name;
       }
     }
     return null;
   }
 
- //回転後のノブ位置計算
+  //回転後のノブ位置計算
   function rotatePoint(px: number, py: number, cx: number, cy: number, rad: number) {
     const dx = px - cx;
     const dy = py - cy;
@@ -1863,7 +1947,7 @@ export default function AppBase() {
   //背景透過関数
   async function handleRemoveBackground(imageSrc: string) {
     try {
-      console.log("✅ 背景透過 開始");
+      //console.log("✅ 背景透過 開始");
       setIsRemovingBg(true); // ← ボタン切り替え開始
 
       const response = await fetch(imageSrc);
@@ -1894,18 +1978,16 @@ export default function AppBase() {
         canvas.toBlob((b) => resolve(b!), "image/png");
       });
 
-      console.log("✅ リサイズ後サイズ", resizedBlob.size);
-
       const transparentBlob = await removeBackground(resizedBlob);
 
-      console.log("✅✅✅ 背景透過 完了！！！");
+      //console.log("✅✅✅ 背景透過 完了！！！");
 
       const url = URL.createObjectURL(transparentBlob);
       setTransparentImage(url);
       setPanelStep(3);
 
     } catch (err) {
-      console.error("❌ 背景透過エラー", err);
+      //console.error("❌ 背景透過エラー", err);
       alert("❌ 背景透過に失敗しました！");
     } finally {
       setIsRemovingBg(false); // ← ボタンを元に戻す
@@ -1914,17 +1996,28 @@ export default function AppBase() {
 
   //ファイル保存用
   function saveCanvasToLocalStorage() {
-    const data = {
+    const raw = localStorage.getItem("my-canvas-save-list");
+    const list: StoredCanvas[] = raw ? JSON.parse(raw) : [];
+
+    const newData: StoredCanvas = {
+      id: crypto.randomUUID(),
       items,
       size,
+      createdAt: Date.now(),
     };
-    localStorage.setItem("my-canvas-save", JSON.stringify(data));
+
+    const newList = [newData, ...list].slice(0, MAX_SAVE_COUNT);
+
+    localStorage.setItem(
+      "my-canvas-save-list",
+      JSON.stringify(newList)
+    );
   }
 
   const saveCanvas = () => {
     if (items.length === 0) return; // 何もなければ保存しない
 
-    const canvas = canvasRef.current;
+    const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
     const image = canvas.toDataURL("image/png"); // ✅ ここで image を作る！
@@ -1937,28 +2030,721 @@ export default function AppBase() {
     };
 
     setSavedList(prev => {
-      console.log("✅ 保存成功:", newData);
+      //console.log("✅ 保存成功:", newData);
       return [newData, ...prev]; // 新しいのを先頭に追加
     });
   };
 
-
-
   return (
-    <div className="w-screen h-screen overflow-hidden bg-pink-50 text-gray-700 flex flex-col font-sans">
-      {/* ヘッダー */}
-      <header className="w-full bg-pink-200 p-4 text-xl font-bold shadow-md flex items-center gap-2">
-        <img
-          src="/icon.png"
-          alt="icon"
-          className="w-16 h-16 rounded-full object-cover"
-        />
-        推しコラージュ作成サイト
-      </header>
+    <>
+      {/* PC画面（sm以上） */}
+      <div className="hidden sm:block">
+        <>
+          <div className="w-screen h-screen overflow-hidden bg-pink-50 text-gray-700 flex flex-col font-sans">
+            {/* ヘッダー */}
+            <header className="w-full bg-pink-200 p-4 text-xl font-bold shadow-md flex items-center gap-2">
+              <img
+                src="/icon.png"
+                alt="icon"
+                className="w-16 h-16 rounded-full object-cover"
+              />
+              推しコラージュ作成サイト
+            </header>
+      
+            <div className="flex flex-1 relative overflow-hidden">
+              {/* 各メニューボタン */}
+              <nav className="w-40 bg-pink-100 border-r border-pink-200 p-3 flex flex-col gap-3">
+                {[
+                  "新規ファイル",
+                  "保存ファイル",
+                  "キャンパスサイズ",
+                  "画像",
+                  "素材",
+                  "文字",
+                  "レイヤー",
+                ].map((label: string) => (
+                  <button
+                    key={label}
+                    onClick={() => {
+                      setActivePanel(label);
+    
+                      if (label === "新規ファイル") {
+                        // ✅ アイテムが1つ以上あるときだけ保存＆通知
+                        if (items.length > 0) {
+                          saveCanvasToLocalStorage();
+                          alert("前の編集内容は自動保存されました。\n保存ファイルから確認できます！");
+                        } else{
+                          alert("新しいファイルになりました！");
+                        }
+                          saveCanvas();
+                          clearCanvas();
+                          setItems([]);           // ✅ これ超重要（描画の元データを消す）
+                          setSelectedId(null);   // ✅ 選択状態もリセット
+                          setActivePanel(null);
+                          setPanelOpen(false);
+                        return;
+                      }  
+                      setPanelOpen(true);
+                    }}
+                    className="w-full py-2 bg-pink-300 rounded-2xl text-sm shadow hover:bg-pink-400 transition"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
+         
+              {/* サイドパネル */}
+              {panelOpen && (
+                <motion.aside
+                  initial={{ x: panelWidth }}
+                  animate={{ x: 0 }}
+                  transition={{ type: "spring", stiffness: 200, damping: 25 }}
+                  style={{ width: panelWidth }}
+                  className="bg-white border-l border-pink-200 shadow-lg h-full relative top-0 flex flex-col overflow-hidden"
+                >
+                  <div className="p-4 font-bold bg-pink-100 border-b border-pink-200 flex justify-between items-center">
+                    {activePanel || "機能パネル"}
+                    <button
+                      onClick={() => setPanelOpen(false)}
+                      className="text-sm bg-pink-300 px-2 py-1 rounded-xl"
+                    >
+                      閉じる
+                    </button>
+                  </div>
+    
+                  <div className="flex-1 p-4 overflow-y-auto text-sm">
+                    {activePanel === "保存ファイル" && (
+                    <>
+                      {/* ✅ デバッグ表示 */}
+                      <div className="text-xs text-gray-500">
+                        保存数：{savedList.length}
+                      </div>
+    
+                      {selectedPreview ? (
+                        <div className="flex flex-col gap-4">                         
+                          <button
+                            onClick={() => {
+                              if (!selectedPreview) return;
+                              loadCanvasFromSaved(selectedPreview);
+                            }}
+                            className="w-full py-2 bg-pink-400 text-white rounded-xl"
+                          >
+                            編集する
+                          </button>
+                          <button
+                            onClick={() => setSelectedPreview(null)}
+                            className="w-full py-2 bg-gray-200 rounded-xl"
+                          >
+                            戻る
+                          </button>
+                          <img
+                            src={selectedPreview.image}
+                            className="w-full rounded-xl shadow"
+                          />
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-3">
+                          {savedList.map(data => (
+                            <button
+                              key={data.id}
+                              onClick={() => {
+                                setSelectedPreview(data);
+                              }}
+                              className="bg-white rounded-xl shadow p-1"
+                            >
+                              <img
+                                src={data.image}
+                                className="w-full h-auto rounded-lg"
+                              />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+         
+                  {activePanel === "キャンパスサイズ" && (
+                    <>
+                      <div className="grid grid-cols-2 gap-3">
+                        {[
+                          { name: "トレカ", id: "button-toreca" },
+                          { name: "A4用紙", id: "button-a4" },
+                          { name: "PC壁紙", id: "button-pc" },
+                          { name: "スマホ壁紙", id: "button-smartphone" },
+                          { name: "手動設定", id: "button-manual" },
+                        ].map((btn) => (
+                          <button
+                            key={btn.id}
+                            id={btn.id}
+                            onClick={() => {
+                              if (btn.name === "手動設定") {
+                                setShowManualInput(true);
+                                return;
+                              }
+                              setShowManualInput(false);
+                              setCanvasName(btn.name as keyof typeof canvasSettings);
+                            }}
+                            className="w-full aspect-[4/3] bg-purple-200 rounded-xl flex items-center justify-center text-3xl font-semibold hover:bg-purple-300 transition"
+                          >
+                            {btn.name}
+                          </button>
+                        ))}
+                      </div>
+                      
+                      {showManualInput && (
+                        <div className="mt-4 space-y-4">
+                          {/* 横 */}
+                          <div>
+                            <label className="block text-sm font-semibold mb-1">横</label>
+                            <div className="relative">
+                              <input
+                                type="number"
+                                value={manualWidth}
+                                onChange={(e) => setManualWidth(Number(e.target.value))}
+                                className="w-full p-2 border rounded-lg"
+                                placeholder="例：1000"
+                              />
+                              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">
+                                px
+                              </span>
+                            </div>
+                          </div>
 
-      <div className="flex flex-1 relative overflow-hidden">
-        {/* 各メニューボタン */}
-        <nav className="w-40 bg-pink-100 border-r border-pink-200 p-3 flex flex-col gap-3">
+                          {/* 縦 */}
+                          <div>
+                            <label className="block text-sm font-semibold mb-1">縦</label>
+                            <div className="relative">
+                              <input
+                                type="number"
+                                value={manualHeight}
+                                onChange={(e) => setManualHeight(Number(e.target.value))}
+                                className="w-full p-2 border rounded-lg"
+                                placeholder="例：1500"
+                              />
+                              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">
+                                px
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* 決定ボタン */}
+                          <button
+                            onClick={handleManualApply}
+                            className="w-full bg-purple-300 text-white py-2 rounded-xl font-semibold hover:bg-purple-400 transition"
+                          >
+                            決定する
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}   
+                           
+                  {activePanel === "画像" && (
+                    <div className="space-y-3">
+
+                      {/* hidden の file input */}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        id="image-upload"
+                        className="hidden"
+                        onChange={handleImageUpload}
+                      />
+
+                      {/* 見た目のボタン */}
+                      {panelStep === 1 && (
+                        <button
+                          onClick={() => document.getElementById("image-upload")?.click()}
+                          className="w-full py-2 bg-purple-300 text-white rounded-xl font-semibold hover:bg-purple-400 transition"
+                        >
+                          ファイルを選択
+                        </button>
+                      )}
+         
+                      {/* 選択画像一覧 */}
+                      {panelStep === 1 && (
+                        <div className="grid grid-cols-2 gap-3">
+                          {uploadedImages.map((src, index) => (
+                            <div
+                              key={index}
+                              className="w-full aspect-square bg-gray-100 rounded-xl overflow-hidden border cursor-pointer"
+                              onClick={() => {
+                                setSelectedImage(src);
+                                setPanelStep(2); // 画面②へ
+                              }}
+                            >
+                              <img src={src} className="w-full h-full object-cover" />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {panelStep === 2 && selectedImage && (
+                      <div className="space-y-3">
+                        <img src={selectedImage} className="w-[60%] mx-auto rounded-xl border" />
+
+                        <button
+                          onClick={() => handleAddToCanvas(selectedImage)}
+                          className="w-full py-2 bg-purple-400 text-white rounded-xl"
+                        >
+                          キャンパスに追加
+                        </button>
+
+                        <button
+                          onClick={() => handleRemoveBackground(selectedImage)}
+                          disabled={isRemovingBg}
+                          className="w-full py-2 rounded bg-pink-500 text-white rounded-xl"
+                        >
+                          {isRemovingBg ? "透過中..." : "背景透過"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedImage(null);
+                            setPanelStep(1); // ✅ 画面①に戻る
+                          }}
+                          className="w-full py-2 bg-gray-300 rounded-xl"
+                        >
+                          戻る
+                        </button>
+                      </div>
+                    )}
+         
+                    {panelStep === 3 && transparentImage && (
+                      <div className="space-y-3">
+                        <img
+                          src={transparentImage}
+                          className="w-[60%] mx-auto rounded-xl border bg-checkered"
+                        />
+
+                        <button
+                          onClick={() => handleAddToCanvas(transparentImage)}
+                          className="w-full py-2 bg-purple-500 text-white rounded-xl"
+                        >
+                          キャンパスに追加
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setTransparentImage(null);
+                            setSelectedImage(null);
+                            setPanelStep(1); // ✅ 画面①に戻る
+                          }}
+                          className="w-full py-2 bg-gray-300 rounded-xl"
+                        >
+                          戻る
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  )}
+         
+                  {activePanel === "素材" && (
+                    <div className="flex h-full">
+
+                      {/* 左側：カテゴリボタン */}
+                      <div className="w-28 bg-gray-100 border-r p-2 flex flex-col gap-2">
+                        {categories.map(cat => (
+                          <button
+                            key={cat.id}
+                            onClick={() => {
+                              setSelectedCategory(cat.id);
+                              setSelectedMaterial(null); // ← 戻った時に素材も解除できるように
+                            }}
+                            className={`p-2 rounded-lg shadow-sm transition ${
+                              selectedCategory === cat.id
+                                ? "bg-purple-300 text-white"
+                                : "bg-purple-100 hover:bg-purple-200 text-purple-700"
+                            }`}
+                          >
+                            {cat.name}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* メインエリア：素材一覧 OR カラー変更画面 */}
+                      <div className="flex-1 p-3 overflow-auto">
+
+                        {/* =========================== */}
+                        {/* ------- 画面切替 ---------- */}
+                        {/* =========================== */}
+
+                        {/* ▼▼ 素材一覧（selectedMaterial が null のときだけ表示） ▼▼ */}
+                        {!selectedMaterial && (
+                          <>
+                            <p className="text-lg font-bold mb-2">
+                              {selectedCategory}
+                            </p>
+
+                            <div className="grid grid-cols-3 gap-2">
+                              {materialsByCategory[selectedCategory as MaterialCategory]?.map(
+                                (material: MaterialItem) => (
+                                  <img
+                                    key={material.id}
+                                    src={material.thumbnail}
+                                    alt={material.name}
+                                    className="cursor-pointer hover:opacity-80"
+                                    onClick={() => setSelectedMaterial(material)} // ← 素材選択
+                                  />
+                                )
+                              )}
+                            </div>
+                          </>
+                        )}
+
+                        {/* ▼▼ カラー変更画面（selectedMaterial が存在する時だけ表示） ▼▼ */}
+                        {selectedMaterial && (
+                          <ColorPickerPanel
+                            selectedMaterial={selectedMaterial}
+                            onConfirm={handleColorConfirm}
+                            onBack={() => setSelectedMaterial(null)}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {activePanel === "文字" && (
+                    <TextPanel
+                      onConfirmText={handleAddText}
+                      onChangeTextSettings={setTextSettings}
+                      textSettings={textSettings}
+                    />
+                  )}
+                  {/* レイヤー */}
+                  {activePanel === "レイヤー" && (
+                    <div className="w-64 bg-white border-l p-2 overflow-y-auto">
+                      {items
+                        .slice()
+                        .reverse()
+                        .map((item, index) => (
+                          <div
+                            key={item.id}
+                            onClick={() => setSelectedId(item.id)}
+                            className={`flex items-center gap-2 p-2 mb-2 border rounded
+                              ${selectedId === item.id
+                                ? "bg-blue-100 border-blue-400"
+                                : "bg-gray-50"}
+                            `}
+                          >
+                            {/* プレビュー */}
+                            {item.type === "image" ? (
+                              <img
+                                src={item.preview ?? item.src}
+                                className="w-12 h-12 object-contain border"
+                                alt=""
+                              />
+                            ) : (
+                              <div className="w-12 h-12 flex items-center justify-center border text-[10px] bg-gray-200">
+                                {item.text || "テキスト"}
+                              </div>
+                            )}
+
+                            {/* 種類表示 */}
+                            <div className="text-xs">
+                              {item.type === "image" ? "画像" : "テキスト"}
+                            </div>
+
+                            {/* 上下移動ボタン（PC・スマホ共通） */}
+                            <div className="flex flex-col ml-auto">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  moveLayer(index, index - 1);
+                                }}
+                                disabled={index === 0}
+                                className="text-xs px-2 py-1 bg-gray-300 rounded mb-1 disabled:opacity-40"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  moveLayer(index, index + 1);
+                                }}
+                                disabled={index === items.length - 1}
+                                className="text-xs px-2 py-1 bg-gray-300 rounded disabled:opacity-40"
+                              >
+                                ↓
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+         
+                {/* リサイズバー */}
+                <div
+                  onMouseDown={startResize}
+                  className="w-2 cursor-col-resize bg-pink-300 absolute left-0 top-0 h-full"
+                />
+              </motion.aside>
+            )}
+
+            {/* キャンバス領域 デフォはトレカサイズ */}  
+            <main className="flex-1 h-full flex items-center justify-center bg-white shadow-inner relative overflow-hidden">
+              <div className="w-full h-full flex items-center justify-center">        {/* ズーム用UI */}
+                <div className="absolute top-4 right-4 z-50 bg-white p-2 rounded-xl shadow flex gap-2 items-center">
+                  <button
+                    onClick={() => setZoom(z => Math.max(z - 0.1, 0.3))}
+                    className="px-2 py-1 bg-pink-300 rounded"
+                  >
+                    −
+                  </button>
+    
+                  <span className="text-sm w-12 text-center">
+                    {Math.round(zoom * 100)}%
+                  </span>
+    
+                  <button
+                    onClick={() => setZoom(z => Math.min(z + 0.1, 3))}
+                    className="px-2 py-1 bg-pink-300 rounded"
+                  >
+                    ＋
+                  </button>
+                </div> 
+                {/* 十字移動UI（長押し対応） */}
+                <div className="absolute top-20 right-4 bg-white p-2 rounded-xl shadow grid grid-cols-3 gap-1 place-items-center z-50">
+                <div />
+        
+                {/* ↑ */}
+                <button
+                  onMouseDown={() => startMove("up")}
+                  onMouseUp={stopMove}
+                  onMouseLeave={stopMove}
+                  onTouchStart={() => startMove("up")}
+                  onTouchEnd={stopMove}
+                  className="px-2 py-1 bg-purple-200 rounded"
+                >
+                  ↑
+                </button>
+  
+                <div />
+  
+                {/* ← */}
+                <button
+                  onMouseDown={() => startMove("left")}
+                  onMouseUp={stopMove}
+                  onMouseLeave={stopMove}
+                  onTouchStart={() => startMove("left")}
+                  onTouchEnd={stopMove}
+                  className="px-2 py-1 bg-purple-200 rounded"
+                >
+                  ←
+                </button>
+  
+                {/* ✅ 中央リセットボタン */}
+                <button
+                  onClick={resetCanvasPosition}
+                  className="px-2 py-1 bg-pink-400 text-white rounded text-xs font-bold flex flex-col items-center leading-tight"
+                >
+                  <span>位置</span>
+                  <span>リセット</span>
+                </button>
+  
+                {/* → */}
+                <button
+                  onMouseDown={() => startMove("right")}
+                  onMouseUp={stopMove}
+                  onMouseLeave={stopMove}
+                  onTouchStart={() => startMove("right")}
+                  onTouchEnd={stopMove}
+                  className="px-2 py-1 bg-purple-200 rounded"
+                >
+                  →
+                </button>
+  
+                <div />
+  
+                {/* ↓ */}
+                <button
+                  onMouseDown={() => startMove("down")}
+                  onMouseUp={stopMove}
+                  onMouseLeave={stopMove}
+                  onTouchStart={() => startMove("down")}
+                  onTouchEnd={stopMove}
+                  className="px-2 py-1 bg-purple-200 rounded"
+                >
+                  ↓
+                </button>
+
+                <div />
+              </div>
+  
+  
+                {/* ズーム＋移動用ラッパー */}
+                <div
+                  style={{
+                    transform: `
+                      translate(${offset.x}px, ${offset.y}px)
+                      scale(${zoom})
+                    `,
+                    transformOrigin: "center",
+                    transition: "transform 0.2s ease",
+                  }}
+                >
+                  <div className="w-full h-full flex items-center justify-center overflow-hidden">
+                    <canvas
+                      key={`${size.w}-${size.h}`}
+                      ref={pcCanvasRef}
+                      width={size.w}
+                      height={size.h}
+                      className="bg-gray-100 border border-gray-300 rounded-xl transition-all duration-300 ease-in-out"
+                      style={{
+                        maxWidth: "100%",
+                        maxHeight: "70vh",
+                        objectFit: "contain"
+                      }}
+                      onMouseDown={handleCanvasMouseDown}
+                      onMouseMove={handleCanvasMouseMove}
+                      onMouseUp={handleCanvasMouseUp}
+                    />
+                  </div>
+                </div>
+              </div>
+            </main>
+            {/* 広告スペース */}
+            <aside className="w-56 bg-pink-100 border-r border-pink-200 p-2 text-sm flex flex-col justify-between">
+              <div>
+                
+              </div>
+  
+              {/* 画像保存ボタン */}
+              <button
+                onClick={handleDownloadImage}
+                className="mt-4 px-2 py-1 bg-pink-300 text-white rounded-lg text-sm shadow"
+              >
+                デバイスに保存する
+              </button>
+            </aside>
+  
+          </div>
+          {/* 使い方ガイド・利用規約・お問い合わせ */}
+          <footer className="w-full bg-pink-100 p-4 text-xs text-gray-600 border-t border-pink-200 flex justify-center gap-6">
+            <span
+              onClick={() => setPopup("guide")}
+              className="cursor-pointer hover:text-pink-500 transition">
+              使い方ガイド
+            </span>
+  
+            <span
+              onClick={() => setPopup("terms")}
+              className="cursor-pointer hover:text-pink-500 transition">
+              利用規約
+            </span>
+  
+            <span
+              onClick={() => setPopup("instagram")}
+              className="cursor-pointer hover:text-pink-500 transition"
+            >
+              Instagram
+            </span>
+  
+                  
+          </footer>
+  
+          {/* ポップアップウィンドウ */}
+          {popup && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
+            >
+              <motion.div
+                initial={{ scale: 0.8, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: "spring", stiffness: 200, damping: 20 }}
+                className="
+                    bg-white w-[600px] p-6 rounded-xl shadow-xl border border-pink-200 relative
+                    max-h-[80vh] overflow-y-auto
+                  "
+                >
+                {/* 閉じるボタン */}
+                <button
+                  onClick={() => setPopup(null)}
+                  className="absolute top-2 right-2 bg-pink-300 text-white px-2 py-1 rounded-lg text-xs"
+                >
+                  閉じる
+                </button>
+  
+                {/* 内容切り替え */}
+                {popup === "guide" && (
+                  <div>
+                    <div
+                      className="text-sm text-gray-700"
+                      dangerouslySetInnerHTML={{ __html: guideContent }}
+                    />
+                  </div>
+                )}
+  
+                {popup === "terms" && (
+                  <div>
+                    <div
+                      className="text-sm text-gray-700"
+                      dangerouslySetInnerHTML={{ __html: termsContent }}
+                    />
+                  </div>
+                )}
+  
+                {/* ▼▼ Instagram ポップアップ追加部分 ▼▼ */}
+                {popup === "instagram" && (
+                  <div className="text-sm text-gray-700 space-y-4">
+  
+                    <p className="font-semibold text-gray-800 text-lg">Instagram</p>
+  
+                    {/* URL 表示 */}
+                    <a
+                      href="https://www.instagram.com/hokurochan_room?igsh=OXkwbGViaXU1b21h&utm_source=qr"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-pink-500 underline break-all"
+                    >
+                      ほくろちゃんの部屋　Instagram
+                    </a>
+  
+                    {/* QRコード画像 */}
+                    <div className="flex justify-center">
+                      <img
+                        src="/qr-instagram.png"  // ← public フォルダに置いた画像
+                        alt="Instagram QR"
+                        className="w-40 h-auto rounded-lg shadow"
+                      />
+                    </div>
+  
+                  </div>
+                )}
+                {/* ▲▲ Instagram ポップアップここまで ▲▲ */}
+  
+              </motion.div>
+            </motion.div>
+          )} 
+        </div>
+      </>
+    </div>
+    {/* スマホ（sm未満） */}
+    <div className="block sm:hidden">
+      <>
+        <div className="w-screen h-screen overflow-hidden bg-pink-50 text-gray-700 flex flex-col font-sans">
+        {/* ヘッダー */}
+        <header className="w-full bg-pink-200 p-4 text-xl font-bold shadow-md flex items-center gap-2">
+          <img
+            src="/icon.png"
+            alt="icon"
+            className="w-16 h-16 rounded-full object-cover"
+          />
+          推しコラージュ作成サイト
+        </header>
+        <div className="flex flex-col flex-1 relative overflow-hidden">
+          {/* 各メニューボタン */}
+          <nav
+            className="
+              w-full bg-pink-100 border-b border-pink-200 
+              px-2 py-2 
+              flex gap-2 overflow-x-auto 
+              scrollbar-none
+              z-60
+            "
+          >
           {[
             "新規ファイル",
             "保存ファイル",
@@ -1968,656 +2754,646 @@ export default function AppBase() {
             "文字",
             "レイヤー",
           ].map((label: string) => (
-             <button
+            <button
               key={label}
               onClick={() => {
                 setActivePanel(label);
 
                 if (label === "新規ファイル") {
-                  // ✅ アイテムが1つ以上あるときだけ保存＆通知
                   if (items.length > 0) {
                     saveCanvasToLocalStorage();
                     alert("前の編集内容は自動保存されました。\n保存ファイルから確認できます！");
-                  } else{
+                  } else {
                     alert("新しいファイルになりました！");
                   }
-                    saveCanvas();
-                    clearCanvas();
-                    setItems([]);           // ✅ これ超重要（描画の元データを消す）
-                    setSelectedId(null);   // ✅ 選択状態もリセット
-                    setActivePanel(null);
-                    setPanelOpen(false);
+                  saveCanvas();
+                  clearCanvas();
+                  setItems([]);
+                  setSelectedId(null);
+                  setActivePanel(null);
+                  setPanelOpen(false);
                   return;
                 }
-
                 setPanelOpen(true);
               }}
-              className="w-full py-2 bg-pink-300 rounded-2xl text-sm shadow hover:bg-pink-400 transition"
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-
-        {/* サイドパネル */}
-        {panelOpen && (
-          <motion.aside
-            initial={{ x: panelWidth }}
-            animate={{ x: 0 }}
-            transition={{ type: "spring", stiffness: 200, damping: 25 }}
-            style={{ width: panelWidth }}
-            className="bg-white border-l border-pink-200 shadow-lg h-full relative top-0 flex flex-col overflow-hidden"
-          >
-              <div className="p-4 font-bold bg-pink-100 border-b border-pink-200 flex justify-between items-center">
-                {activePanel || "機能パネル"}
+              className="
+                flex-shrink-0
+                px-3 py-1 
+                bg-pink-300 rounded-xl 
+                text-xs font-semibold
+                shadow 
+                hover:bg-pink-400 
+                transition
+              "
+              >
+                {label}
+              </button>
+              ))}
+            </nav>
+            <main className="flex-1 flex items-center justify-center bg-white relative overflow-hidden">
+            <div className="w-full h-full flex items-center justify-center relative">
+              {/* ズーム UI（位置はスマホに合わせて調整） */}
+              <div className="absolute top-3 right-3 z-30 bg-white p-2 rounded-xl shadow flex gap-2 items-center">
                 <button
-                  onClick={() => setPanelOpen(false)}
-                  className="text-sm bg-pink-300 px-2 py-1 rounded-xl"
+                  onClick={() => setZoom(z => Math.max(z - 0.1, 0.3))}
+                  className="px-2 py-1 bg-pink-300 rounded"
                 >
-                  閉じる
+                  −
+                </button>
+
+                <span className="text-sm w-12 text-center">
+                  {Math.round(zoom * 100)}%
+                </span>
+
+                <button
+                  onClick={() => setZoom(z => Math.min(z + 0.1, 3))}
+                  className="px-2 py-1 bg-pink-300 rounded"
+                >
+                  ＋
                 </button>
               </div>
+              <div
+                style={{
+                  transform: `
+                    translate(${offset.x}px, ${offset.y}px)
+                    scale(${zoom})
+                  `,
+                  transformOrigin: "center",
+                  transition: "transform 0.2s ease",
+                }}
+                className="w-full h-full flex items-center justify-center"
+              >
+                <div className="w-full h-full flex items-center justify-center overflow-hidden">
+                  <canvas
+                    key={`${size.w}-${size.h}`}
+                    ref={spCanvasRef}
+                    width={size.w}
+                    height={size.h}
+                    className="bg-gray-100 border border-gray-300 rounded-xl"
+                    style={{
+                      touchAction: "none",
 
-              <div className="flex-1 p-4 overflow-y-auto text-sm">
-                {activePanel === "保存ファイル" && (
-                <>
-                  {/* ✅ デバッグ表示 */}
-                  <div className="text-xs text-gray-500">
-                    保存数：{savedList.length}
-                  </div>
+                      // ⭐ 初期表示が必ず画面に収まる
+                      maxWidth: "100%",
+                      maxHeight: "100%",
+                      objectFit: "contain",
 
-                  {selectedPreview ? (
-                    <div className="flex flex-col gap-4">
-                      
-                      <button
-                        onClick={() => {
-                          if (!selectedPreview) return;
-                          loadCanvasFromSaved(selectedPreview);
-                        }}
-                        className="w-full py-2 bg-pink-400 text-white rounded-xl"
-                      >
-                        編集する
-                      </button>
-
-                      <button
-                        onClick={() => setSelectedPreview(null)}
-                        className="w-full py-2 bg-gray-200 rounded-xl"
-                      >
-                        戻る
-                      </button>
-                      <img
-                        src={selectedPreview.image}
-                        className="w-full rounded-xl shadow"
-                      />
-
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-3">
-                      {savedList.map(data => (
-                        <button
-                          key={data.id}
-                          onClick={() => {
-                            console.log("選択した", data);
-                            setSelectedPreview(data);
-                          }}
-                          className="bg-white rounded-xl shadow p-1"
-                        >
-                          <img
-                            src={data.image}
-                            className="w-full h-auto rounded-lg"
-                          />
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-                {activePanel === "キャンパスサイズ" && (
-                  <>
-                    <div className="grid grid-cols-2 gap-3">
-                      {[
-                        { name: "トレカ", id: "button-toreca" },
-                        { name: "A4用紙", id: "button-a4" },
-                        { name: "PC壁紙", id: "button-pc" },
-                        { name: "スマホ壁紙", id: "button-smartphone" },
-                        { name: "手動設定", id: "button-manual" },
-                      ].map((btn) => (
-                        <button
-                          key={btn.id}
-                          id={btn.id}
-                          onClick={() => {
-                            if (btn.name === "手動設定") {
-                              setShowManualInput(true);
-                              return;
-                            }
-                            setShowManualInput(false);
-                            setCanvasName(btn.name as keyof typeof canvasSettings);
-                          }}
-                          className="w-full aspect-[4/3] bg-purple-200 rounded-xl flex items-center justify-center text-3xl font-semibold hover:bg-purple-300 transition"
-                        >
-                          {btn.name}
-                        </button>
-                      ))}
-                    </div>
-                    
-                    {showManualInput && (
-                      <div className="mt-4 space-y-4">
-                        {/* 横 */}
-                        <div>
-                          <label className="block text-sm font-semibold mb-1">横</label>
-                          <div className="relative">
-                            <input
-                              type="number"
-                              value={manualWidth}
-                              onChange={(e) => setManualWidth(Number(e.target.value))}
-                              className="w-full p-2 border rounded-lg"
-                              placeholder="例：1000"
-                            />
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">
-                              px
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* 縦 */}
-                        <div>
-                          <label className="block text-sm font-semibold mb-1">縦</label>
-                          <div className="relative">
-                            <input
-                              type="number"
-                              value={manualHeight}
-                              onChange={(e) => setManualHeight(Number(e.target.value))}
-                              className="w-full p-2 border rounded-lg"
-                              placeholder="例：1500"
-                            />
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">
-                              px
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* 決定ボタン */}
-                        <button
-                          onClick={handleManualApply}
-                          className="w-full bg-purple-300 text-white py-2 rounded-xl font-semibold hover:bg-purple-400 transition"
-                        >
-                          決定する
-                        </button>
-                      </div>
-                    )}
-                  </>
-                )}   
-
-                
-                {activePanel === "画像" && (
-                  <div className="space-y-3">
-
-                    {/* hidden の file input */}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      id="image-upload"
-                      className="hidden"
-                      onChange={handleImageUpload}
-                    />
-
-                    {/* 見た目のボタン */}
-                    {panelStep === 1 && (
-                      <button
-                        onClick={() => document.getElementById("image-upload")?.click()}
-                        className="w-full py-2 bg-purple-300 text-white rounded-xl font-semibold hover:bg-purple-400 transition"
-                      >
-                        ファイルを選択
-                      </button>
-                    )}
-
-                    {/* 選択画像一覧 */}
-                    {panelStep === 1 && (
-                      <div className="grid grid-cols-2 gap-3">
-                        {uploadedImages.map((src, index) => (
-                          <div
-                            key={index}
-                            className="w-full aspect-square bg-gray-100 rounded-xl overflow-hidden border cursor-pointer"
-                            onClick={() => {
-                              setSelectedImage(src);
-                              setPanelStep(2); // 画面②へ
-                            }}
-                          >
-                            <img src={src} className="w-full h-full object-cover" />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {panelStep === 2 && selectedImage && (
-                    <div className="space-y-3">
-                      <img src={selectedImage} className="w-[60%] mx-auto rounded-xl border" />
-
-                      <button
-                        onClick={() => handleAddToCanvas(selectedImage)}
-                        className="w-full py-2 bg-purple-400 text-white rounded-xl"
-                      >
-                        キャンパスに追加
-                      </button>
-
-                      <button
-                        onClick={() => handleRemoveBackground(selectedImage)}
-                        disabled={isRemovingBg}
-                        className="w-full py-2 rounded bg-pink-500 text-white rounded-xl"
-                      >
-                        {isRemovingBg ? "透過中..." : "背景透過"}
-                      </button>
-                      <button
-                        onClick={() => {
-                          setSelectedImage(null);
-                          setPanelStep(1); // ✅ 画面①に戻る
-                        }}
-                        className="w-full py-2 bg-gray-300 rounded-xl"
-                      >
-                        戻る
-                      </button>
-                    </div>
-                  )}
-
-                  {panelStep === 3 && transparentImage && (
-                    <div className="space-y-3">
-                      <img
-                        src={transparentImage}
-                        className="w-[60%] mx-auto rounded-xl border bg-checkered"
-                      />
-
-                      <button
-                        onClick={() => handleAddToCanvas(transparentImage)}
-                        className="w-full py-2 bg-purple-500 text-white rounded-xl"
-                      >
-                        キャンパスに追加
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          setTransparentImage(null);
-                          setSelectedImage(null);
-                          setPanelStep(1); // ✅ 画面①に戻る
-                        }}
-                        className="w-full py-2 bg-gray-300 rounded-xl"
-                      >
-                        戻る
-                      </button>
-                    </div>
-                  )}
-                </div>
-                )}
-
-                {activePanel === "素材" && (
-                  <div className="flex h-full">
-
-                    {/* 左側：カテゴリボタン */}
-                    <div className="w-28 bg-gray-100 border-r p-2 flex flex-col gap-2">
-                      {categories.map(cat => (
-                        <button
-                          key={cat.id}
-                          onClick={() => {
-                            setSelectedCategory(cat.id);
-                            setSelectedMaterial(null); // ← 戻った時に素材も解除できるように
-                          }}
-                          className={`p-2 rounded-lg shadow-sm transition ${
-                            selectedCategory === cat.id
-                              ? "bg-purple-300 text-white"
-                              : "bg-purple-100 hover:bg-purple-200 text-purple-700"
-                          }`}
-                        >
-                          {cat.name}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* メインエリア：素材一覧 OR カラー変更画面 */}
-                    <div className="flex-1 p-3 overflow-auto">
-
-                      {/* =========================== */}
-                      {/* ------- 画面切替 ---------- */}
-                      {/* =========================== */}
-
-                      {/* ▼▼ 素材一覧（selectedMaterial が null のときだけ表示） ▼▼ */}
-                      {!selectedMaterial && (
-                        <>
-                          <p className="text-lg font-bold mb-2">
-                            {selectedCategory}
-                          </p>
-
-                          <div className="grid grid-cols-3 gap-2">
-                            {materialsByCategory[selectedCategory as MaterialCategory]?.map(
-                              (material: MaterialItem) => (
-                                <img
-                                  key={material.id}
-                                  src={material.thumbnail}
-                                  alt={material.name}
-                                  className="cursor-pointer hover:opacity-80"
-                                  onClick={() => setSelectedMaterial(material)} // ← 素材選択
-                                />
-                              )
-                            )}
-                          </div>
-                        </>
-                      )}
-
-                      {/* ▼▼ カラー変更画面（selectedMaterial が存在する時だけ表示） ▼▼ */}
-                      {selectedMaterial && (
-                        <ColorPickerPanel
-                          selectedMaterial={selectedMaterial}
-                          onConfirm={handleColorConfirm}
-                          onBack={() => setSelectedMaterial(null)}
-
-                        />
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {activePanel === "文字" && (
-                  <TextPanel
-                    onConfirmText={handleAddText}
-                    onChangeTextSettings={setTextSettings}
-                    textSettings={textSettings}
+                    }}
+                    onMouseDown={handleCanvasMouseDown}
+                    onMouseMove={handleCanvasMouseMove}
+                    onMouseUp={handleCanvasMouseUp}
+                    onTouchStart={handleCanvasMouseDown}
+                    onTouchMove={handleCanvasMouseMove}
+                    onTouchEnd={handleCanvasMouseUp}
                   />
-                )}
-                {/* レイヤー */}
-                {activePanel === "レイヤー" && (
-                  <div className="w-64 bg-white border-l p-2 overflow-y-auto">
-                    {items
-                      .slice()
-                      .reverse()
-                      .map((item, index) => (
-                        <div
-                          key={item.id}
-                          draggable
-                          onClick={() => setSelectedId(item.id)} // ✅ これだけ追加！！
-                          onDragStart={() => setDragIndex(index)}
-                          onDragOver={(e) => e.preventDefault()}
-                          onDrop={() => {
-                            if (dragIndex === null) return;
-                            moveLayer(dragIndex, index);
-                            setDragIndex(null);
-                          }}
-                          className={`flex items-center gap-2 p-2 mb-2 border rounded cursor-move
-                            ${selectedId === item.id ? "bg-blue-100 border-blue-400" : "bg-gray-50"}
-                          `}
-                        >
-                          {/* ✅ プレビュー */}
-                          {item.type === "image" ? (
-                            <img
-                              src={item.preview ?? item.src}
-                              className="w-12 h-12 object-contain border"
-                              alt=""
-                            />
-                          ) : (
-                            <div className="w-12 h-12 flex items-center justify-center border text-[10px] bg-gray-200">
-                              テキスト
-                            </div>
-                          )}
-
-                          {/* ✅ 種類表示 */}
-                          <div className="text-xs">
-                            {item.type === "image" ? "画像" : "テキスト"}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                )}
-
-              </div>
-
-            {/* リサイズバー */}
-            <div
-              onMouseDown={startResize}
-              className="w-2 cursor-col-resize bg-pink-300 absolute left-0 top-0 h-full"
-            />
-          </motion.aside>
-        )}
-
-
-        {/* キャンバス領域 デフォはトレカサイズ */}  
-        <main className="flex-1 flex items-center justify-center bg-white shadow-inner relative overflow-hidden">
-          <div className="w-full h-full flex items-center justify-center">        {/* ズーム用UI */}
-          <div className="absolute top-4 right-4 z-50 bg-white p-2 rounded-xl shadow flex gap-2 items-center">
-            <button
-              onClick={() => setZoom(z => Math.max(z - 0.1, 0.3))}
-              className="px-2 py-1 bg-pink-300 rounded"
-            >
-              −
-            </button>
-
-            <span className="text-sm w-12 text-center">
-              {Math.round(zoom * 100)}%
-            </span>
-
-            <button
-              onClick={() => setZoom(z => Math.min(z + 0.1, 3))}
-              className="px-2 py-1 bg-pink-300 rounded"
-            >
-              ＋
-            </button>
-          </div> 
-
-          {/* 十字移動UI（長押し対応） */}
-          <div className="absolute top-20 right-4 bg-white p-2 rounded-xl shadow grid grid-cols-3 gap-1 place-items-center z-50">
-            <div />
-
-            {/* ↑ */}
-            <button
-              onMouseDown={() => startMove("up")}
-              onMouseUp={stopMove}
-              onMouseLeave={stopMove}
-              onTouchStart={() => startMove("up")}
-              onTouchEnd={stopMove}
-              className="px-2 py-1 bg-purple-200 rounded"
-            >
-              ↑
-            </button>
-
-            <div />
-
-            {/* ← */}
-            <button
-              onMouseDown={() => startMove("left")}
-              onMouseUp={stopMove}
-              onMouseLeave={stopMove}
-              onTouchStart={() => startMove("left")}
-              onTouchEnd={stopMove}
-              className="px-2 py-1 bg-purple-200 rounded"
-            >
-              ←
-            </button>
-
-            {/* ✅ 中央リセットボタン */}
-            <button
-              onClick={resetCanvasPosition}
-              className="px-2 py-1 bg-pink-400 text-white rounded text-xs font-bold flex flex-col items-center leading-tight"
-            >
-              <span>位置</span>
-              <span>リセット</span>
-            </button>
-
-            {/* → */}
-            <button
-              onMouseDown={() => startMove("right")}
-              onMouseUp={stopMove}
-              onMouseLeave={stopMove}
-              onTouchStart={() => startMove("right")}
-              onTouchEnd={stopMove}
-              className="px-2 py-1 bg-purple-200 rounded"
-            >
-              →
-            </button>
-
-            <div />
-
-            {/* ↓ */}
-            <button
-              onMouseDown={() => startMove("down")}
-              onMouseUp={stopMove}
-              onMouseLeave={stopMove}
-              onTouchStart={() => startMove("down")}
-              onTouchEnd={stopMove}
-              className="px-2 py-1 bg-purple-200 rounded"
-            >
-              ↓
-            </button>
-
-            <div />
-          </div>
-
-
-            {/* ズーム＋移動用ラッパー */}
-            <div
-              style={{
-                transform: `
-                  translate(${offset.x}px, ${offset.y}px)
-                  scale(${zoom})
-                `,
-                transformOrigin: "center",
-                transition: "transform 0.2s ease",
-              }}
-            >
-              <div className="max-w-full max-h-full flex items-center justify-center">
-                <canvas
-                  key={`${size.w}-${size.h}`}
-                  ref={canvasRef}
-                  width={size.w}
-                  height={size.h}
-                  className="bg-gray-100 border border-gray-300 rounded-xl transition-all duration-300 ease-in-out"
-                  style={{
-                    maxWidth: "100%",
-                    maxHeight: "100%",
-                    objectFit: "contain"
-                  }}
-                  onMouseDown={handleCanvasMouseDown}
-                  onMouseMove={handleCanvasMouseMove}
-                  onMouseUp={handleCanvasMouseUp}
-                />
+                </div>
               </div>
             </div>
-          </div>
-        </main>
-
-
-
-        {/* 広告スペース */}
-        <aside className="w-56 bg-pink-100 border-r border-pink-200 p-2 text-sm flex flex-col justify-between">
-          <div>
-            
-          </div>
-
-          {/* 画像保存ボタン */}
-          <button
-            onClick={handleDownloadImage}
-            className="mt-4 px-2 py-1 bg-pink-300 text-white rounded-lg text-sm shadow"
-          >
-            デバイスに保存する
-          </button>
-        </aside>
-
-      </div>
-
-      {/* 使い方ガイド・利用規約・お問い合わせ */}
-      <footer className="w-full bg-pink-100 p-4 text-xs text-gray-600 border-t border-pink-200 flex justify-center gap-6">
-        <span
-          onClick={() => setPopup("guide")}
-          className="cursor-pointer hover:text-pink-500 transition">
-          使い方ガイド
-        </span>
-
-        <span
-          onClick={() => setPopup("terms")}
-          className="cursor-pointer hover:text-pink-500 transition">
-          利用規約
-        </span>
-
-         <span
-          onClick={() => setPopup("instagram")}
-          className="cursor-pointer hover:text-pink-500 transition"
-        >
-          Instagram
-        </span>
-
-              
-      </footer>
-
-      {/* ポップアップウィンドウ */}
-      {popup && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
-        >
-          <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ type: "spring", stiffness: 200, damping: 20 }}
-            className="bg-white w-[600px] p-6 rounded-xl shadow-xl border border-pink-200 relative"
-          >
-            {/* 閉じるボタン */}
-            <button
-              onClick={() => setPopup(null)}
-              className="absolute top-2 right-2 bg-pink-300 text-white px-2 py-1 rounded-lg text-xs"
+          </main>
+          {/* サイドパネル */}
+          {panelOpen && (
+            <motion.aside
+              initial={{ x: panelWidth }}
+              animate={{ x: 0 }}
+              transition={{ type: "spring", stiffness: 200, damping: 25 }}
+              style={{
+                position: "absolute",
+                right: 0,
+                top: `${navHeight}px`,                                // ← 今まで通り
+                width: `min(${panelWidth}px, calc(100vw - 10px))`,    // ← 画面幅に収める
+                height: `calc(100vh - ${navHeight + footerHeight}px)`,
+              }}
+              className="
+                bg-white border-l border-pink-200 shadow-lg
+                flex flex-col
+                overflow-y-auto overflow-x-hidden
+                z-40
+              "
             >
-              閉じる
-            </button>
 
-            {/* 内容切り替え */}
-            {popup === "guide" && (
-              <div>
-                <div
-                  className="text-sm text-gray-700"
-                  dangerouslySetInnerHTML={{ __html: guideContent }}
-                />
-              </div>
-            )}
-
-            {popup === "terms" && (
-              <div>
-                <div
-                  className="text-sm text-gray-700"
-                  dangerouslySetInnerHTML={{ __html: termsContent }}
-                />
-              </div>
-            )}
-
-            {/* ▼▼ Instagram ポップアップ追加部分 ▼▼ */}
-            {popup === "instagram" && (
-              <div className="text-sm text-gray-700 space-y-4">
-
-                <p className="font-semibold text-gray-800 text-lg">Instagram</p>
-
-                {/* URL 表示 */}
-                <a
-                  href="https://www.instagram.com/hokurochan_room?igsh=OXkwbGViaXU1b21h&utm_source=qr"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-pink-500 underline break-all"
-                >
-                  ほくろちゃんの部屋　Instagram
-                </a>
-
-                {/* QRコード画像 */}
-                <div className="flex justify-center">
-                  <img
-                    src="/qr-instagram.png"  // ← public フォルダに置いた画像
-                    alt="Instagram QR"
-                    className="w-40 h-auto rounded-lg shadow"
-                  />
+            <div className="p-4 font-bold bg-pink-100 border-b border-pink-200 flex justify-between items-center">
+              {activePanel || "機能パネル"}
+              <button
+                onClick={() => setPanelOpen(false)}
+                className="text-sm bg-pink-300 px-2 py-1 rounded-xl"
+              >
+                閉じる
+              </button>
+            </div>
+              <div className="flex-1 p-4 overflow-y-auto text-sm">
+              {activePanel === "保存ファイル" && (
+              <>
+                {/* ✅ デバッグ表示 */}
+                <div className="text-xs text-gray-500">
+                  保存数：{savedList.length}
                 </div>
 
+                {selectedPreview ? (
+                  <div className="flex flex-col gap-4">                            
+                    <button
+                      onClick={() => {
+                        if (!selectedPreview) return;
+                        loadCanvasFromSaved(selectedPreview);
+                      }}
+                      className="w-full py-2 bg-pink-400 text-white rounded-xl"
+                    >
+                      編集する
+                    </button>
+
+                    <button
+                      onClick={() => setSelectedPreview(null)}
+                      className="w-full py-2 bg-gray-200 rounded-xl"
+                    >
+                      戻る
+                    </button>
+                    <img
+                      src={selectedPreview.image}
+                      className="w-full rounded-xl shadow"
+                    />
+
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    {savedList.map(data => (
+                      <button
+                        key={data.id}
+                        onClick={() => {
+                          setSelectedPreview(data);
+                        }}
+                        className="bg-white rounded-xl shadow p-1"
+                      >
+                        <img
+                          src={data.image}
+                          className="w-full h-auto rounded-lg"
+                        />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {activePanel === "キャンパスサイズ" && (
+              <div className="flex-1 p-4 overflow-auto">
+
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { name: "トレカ", id: "button-toreca" },
+                    { name: "A4用紙", id: "button-a4" },
+                    { name: "PC壁紙", id: "button-pc" },
+                    { name: "スマホ壁紙", id: "button-smartphone" },
+                    { name: "手動設定", id: "button-manual" },
+                  ].map((btn) => (
+                    <button
+                      key={btn.id}
+                      id={btn.id}
+                      onClick={() => {
+                        if (btn.name === "手動設定") {
+                          setShowManualInput(true);
+                          return;
+                        }
+                        setShowManualInput(false);
+                        setCanvasName(btn.name as keyof typeof canvasSettings);
+
+                        alert(`キャンバスサイズを「${btn.name}」に変更しました！`);
+                      }}
+                      className="w-full aspect-[4/3] bg-purple-200 rounded-xl flex items-center justify-center text-3xl font-semibold hover:bg-purple-300 transition"
+                    >
+                      {btn.name}
+                    </button>
+                  ))}
+                </div>
+
+                {showManualInput && (
+                  <div className="mt-4 space-y-4">
+                    {/* 横 */}
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">横</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          value={manualWidth}
+                          onChange={(e) => setManualWidth(Number(e.target.value))}
+                          className="w-full p-2 border rounded-lg"
+                          placeholder="例：1000"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">px</span>
+                      </div>
+                    </div>
+
+                    {/* 縦 */}
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">縦</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          value={manualHeight}
+                          onChange={(e) => setManualHeight(Number(e.target.value))}
+                          className="w-full p-2 border rounded-lg"
+                          placeholder="例：1500"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">px</span>
+                      </div>
+                    </div>
+
+                    {/* 決定ボタン */}
+                    <button
+                      onClick={() => {
+                        handleManualApply();
+                        alert(`キャンバスサイズを ${manualWidth}×${manualHeight}px に変更しました！`);
+                      }}
+                      className="w-full bg-purple-300 text-white py-2 rounded-xl font-semibold hover:bg-purple-400 transition"
+                    >
+                      決定する
+                    </button>
+                  </div>
+                )}
               </div>
             )}
-            {/* ▲▲ Instagram ポップアップここまで ▲▲ */}
 
-          </motion.div>
-        </motion.div>
-      )} 
+          
+            {activePanel === "画像" && (
+              <div className="space-y-3">
 
+                {/* hidden の file input */}
+                <input
+                  type="file"
+                  accept="image/*"
+                  id="image-upload"
+                  className="hidden"
+                  onChange={handleImageUpload}
+                />
+
+                {/* 見た目のボタン */}
+                {panelStep === 1 && (
+                  <button
+                    onClick={() => document.getElementById("image-upload")?.click()}
+                    className="w-full py-2 bg-purple-300 text-white rounded-xl font-semibold hover:bg-purple-400 transition"
+                  >
+                    ファイルを選択
+                  </button>
+                )}
+
+                {/* 選択画像一覧 */}
+                {panelStep === 1 && (
+                  <div className="grid grid-cols-2 gap-3">
+                    {uploadedImages.map((src, index) => (
+                      <div
+                        key={index}
+                        className="w-full aspect-square bg-gray-100 rounded-xl overflow-hidden border cursor-pointer"
+                        onClick={() => {
+                          setSelectedImage(src);
+                          setPanelStep(2); // 画面②へ
+                        }}
+                      >
+                        <img src={src} className="w-full h-full object-cover" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {panelStep === 2 && selectedImage && (
+                <div className="space-y-3">
+                  <img src={selectedImage} className="w-[60%] mx-auto rounded-xl border" />
+
+                  <button
+                    onClick={() => {
+                      handleAddToCanvas(selectedImage);
+                      setPanelOpen(false);
+                    }}
+                    className="w-full py-2 bg-purple-400 text-white rounded-xl"
+                  >
+                    キャンパスに追加
+                  </button>
+
+                  <button
+                    onClick={() => handleRemoveBackground(selectedImage)}
+                    disabled={isRemovingBg}
+                    className="w-full py-2 rounded bg-pink-500 text-white rounded-xl"
+                  >
+                    {isRemovingBg ? "透過中..." : "背景透過"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectedImage(null);
+                      setPanelStep(1); // ✅ 画面①に戻る
+                    }}
+                    className="w-full py-2 bg-gray-300 rounded-xl"
+                  >
+                    戻る
+                  </button>
+                </div>
+              )}
+
+              {panelStep === 3 && transparentImage && (
+                <div className="space-y-3">
+                  <img
+                    src={transparentImage}
+                    className="w-[60%] mx-auto rounded-xl border bg-checkered"
+                  />
+
+                  <button
+                    onClick={() =>{
+                      handleAddToCanvas(transparentImage)
+                      setPanelOpen(false);
+                    }
+                    }
+                    className="w-full py-2 bg-purple-500 text-white rounded-xl"
+                  >
+                    キャンパスに追加
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setTransparentImage(null);
+                      setSelectedImage(null);
+                      setPanelStep(1); // ✅ 画面①に戻る
+                    }}
+                    className="w-full py-2 bg-gray-300 rounded-xl"
+                  >
+                    戻る
+                  </button>
+                </div>
+              )}
+            </div>
+            )}
+  
+            {activePanel === "素材" && (
+              <div className="flex h-full">
+
+                {/* 左側：カテゴリボタン */}
+                <div className="w-28 bg-gray-100 border-r p-2 flex flex-col gap-2">
+                  {categories.map(cat => (
+                    <button
+                      key={cat.id}
+                      onClick={() => {
+                        setSelectedCategory(cat.id);
+                        setSelectedMaterial(null); // ← 戻った時に素材も解除できるように
+                      }}
+                      className={`p-2 rounded-lg shadow-sm transition ${
+                        selectedCategory === cat.id
+                          ? "bg-purple-300 text-white"
+                          : "bg-purple-100 hover:bg-purple-200 text-purple-700"
+                      }`}
+                    >
+                      {cat.name}
+                    </button>
+                  ))}
+                </div>
+  
+                {/* メインエリア：素材一覧 OR カラー変更画面 */}
+                <div className="flex-1 p-3 overflow-auto">
+
+                  {/* =========================== */}
+                  {/* ------- 画面切替 ---------- */}
+                  {/* =========================== */}
+
+                  {/* ▼▼ 素材一覧（selectedMaterial が null のときだけ表示） ▼▼ */}
+                  {!selectedMaterial && (
+                    <>
+                      <p className="text-lg font-bold mb-2">
+                        {selectedCategory}
+                      </p>
+
+                      <div className="grid grid-cols-3 gap-2">
+                        {materialsByCategory[selectedCategory as MaterialCategory]?.map(
+                          (material: MaterialItem) => (
+                            <img
+                              key={material.id}
+                              src={material.thumbnail}
+                              alt={material.name}
+                              className="cursor-pointer hover:opacity-80"
+                              onClick={() => setSelectedMaterial(material)} // ← 素材選択
+                            />
+                          )
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  {/* ▼▼ カラー変更画面（selectedMaterial が存在する時だけ表示） ▼▼ */}
+                  {selectedMaterial && (
+                    <ColorPickerPanel
+                      selectedMaterial={selectedMaterial}
+                      onConfirm={(finalMaterial) => {
+                        handleColorConfirm(finalMaterial);
+                        setActivePanel(null);
+                        setPanelOpen(false);
+                      }}
+                      onBack={() => setSelectedMaterial(null)}
+
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+        
+            {activePanel === "文字" && (
+              <TextPanel
+                onConfirmText={(textItem) => {
+                  handleAddText(textItem);  // 文字追加
+                  setActivePanel(null);     // パネルを閉じる
+                  setPanelOpen(false);
+                }}
+                onChangeTextSettings={setTextSettings}
+                textSettings={textSettings}
+              />
+            )}
+            {/* レイヤー */}
+            {activePanel === "レイヤー" && (
+              <div className="w-64 bg-white border-l p-2 overflow-y-auto">
+              {items
+                .slice()
+                .reverse()
+                .map((item, index) => (
+                  <div
+                    key={item.id}
+                    onClick={() => setSelectedId(item.id)}
+                    className={`flex items-center gap-2 p-2 mb-2 border rounded
+                      ${selectedId === item.id ? "bg-blue-100 border-blue-400" : "bg-gray-50"}
+                    `}
+                  >
+                    {/* ✅ プレビュー */}
+                    {item.type === "image" ? (
+                      <img
+                        src={item.preview ?? item.src}
+                        className="w-12 h-12 object-contain border"
+                        alt=""
+                      />
+                    ) : (
+                      <div className="w-12 h-12 flex items-center justify-center border text-[10px] bg-gray-200">
+                        {textSettings.text || "テキスト"}
+                      </div>
+                    )}
+
+                    {/* ✅ 種類表示 */}
+                    <div className="text-xs">
+                      {item.type === "image" ? "画像" : "テキスト"}
+                    </div>
+
+                    {/* ✅ スマホ用上下ボタン */}
+                    <div className="flex flex-col ml-auto sm:hidden"> {/* sm:hiddenでPCでは非表示 */}
+                      <button
+                        onClick={() => moveLayer(index, index - 1)}
+                        disabled={index === 0}
+                        className="text-xs px-1 bg-gray-300 rounded mb-1"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        onClick={() => moveLayer(index, index + 1)}
+                        disabled={index === items.length - 1}
+                        className="text-xs px-1 bg-gray-300 rounded"
+                      >
+                        ↓
+                      </button>
+                    </div>
+
+                    {/* ✅ PC用ドラッグ */}
+                    <div className="hidden sm:block cursor-move"
+                      draggable
+                      onDragStart={() => setDragIndex(index)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={() => {
+                        if (dragIndex === null) return;
+                        moveLayer(dragIndex, index);
+                        setDragIndex(null);
+                      }}
+                    >
+                      ☰
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        
+          {/* リサイズバー */}
+          <div
+            onMouseDown={startResize}
+            className="w-2 cursor-col-resize bg-pink-300 absolute left-0 top-0 h-full"
+          />
+        </motion.aside>
+      )}
+      
+      {/* 広告スペース */}
+      {/* ★ スマホ専用：画面下に広告（将来用） */}
+      <aside className="w-full bg-pink-100 border-t border-pink-200 p-2 text-sm flex flex-col items-center">
+        
+        {/* 広告エリア（今は空欄） */}
+        <div className="w-full py-4 text-center text-gray-500">
+          
+        </div>
+
+        {/* 画像保存ボタン */}
+        <button
+          onClick={handleDownloadImage}
+          className="mt-2 px-3 py-2 bg-pink-300 text-white rounded-xl text-sm shadow"
+        >
+          デバイスに保存する
+        </button>
+      </aside>
     </div>
+    {/* 使い方ガイド・利用規約・お問い合わせ */}
+    <footer className="w-full bg-pink-100 p-4 text-xs text-gray-600 border-t border-pink-200 flex justify-center gap-6">
+      <span
+        onClick={() => setPopup("guide")}
+        className="cursor-pointer hover:text-pink-500 transition">
+        使い方ガイド
+      </span>
+
+      <span
+        onClick={() => setPopup("terms")}
+        className="cursor-pointer hover:text-pink-500 transition">
+        利用規約
+      </span>
+
+      <span
+        onClick={() => setPopup("instagram")}
+        className="cursor-pointer hover:text-pink-500 transition"
+      >
+        Instagram
+      </span> 
+    </footer>
+    {/* ポップアップウィンドウ */}
+    {popup && (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 bg-black/30 flex items-center justify-center z-70"
+      >
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ type: "spring", stiffness: 200, damping: 20 }}
+          className="
+              bg-white w-[600px] p-6 rounded-xl shadow-xl border border-pink-200 relative
+              max-h-[80vh] overflow-y-auto
+            "
+          >
+          {/* 閉じるボタン */}
+          <button
+            onClick={() => setPopup(null)}
+            className="absolute top-2 right-2 bg-pink-300 text-white px-2 py-1 rounded-lg text-xs"
+          >
+            閉じる
+          </button>
+
+          {/* 内容切り替え */}
+          {popup === "guide" && (
+            <div>
+              <div
+                className="text-sm text-gray-700"
+                dangerouslySetInnerHTML={{ __html: guideContent }}
+              />
+            </div>
+          )}
+
+          {popup === "terms" && (
+            <div>
+              <div
+                className="text-sm text-gray-700"
+                dangerouslySetInnerHTML={{ __html: termsContent }}
+              />
+            </div>
+          )}
+
+          {/* ▼▼ Instagram ポップアップ追加部分 ▼▼ */}
+          {popup === "instagram" && (
+            <div className="text-sm text-gray-700 space-y-4">
+
+              <p className="font-semibold text-gray-800 text-lg">Instagram</p>
+
+              {/* URL 表示 */}
+              <a
+                href="https://www.instagram.com/hokurochan_room?igsh=OXkwbGViaXU1b21h&utm_source=qr"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-pink-500 underline break-all"
+              >
+                ほくろちゃんの部屋　Instagram
+              </a>
+
+              {/* QRコード画像 */}
+              <div className="flex justify-center">
+                <img
+                  src="/qr-instagram.png"  // ← public フォルダに置いた画像
+                  alt="Instagram QR"
+                  className="w-40 h-auto rounded-lg shadow"
+                />
+              </div>
+
+            </div>
+          )}
+          {/* ▲▲ Instagram ポップアップここまで ▲▲ */}
+
+        </motion.div>
+      </motion.div>
+    )} 
+</div>
+</>
+</div>
+</>
   );
 }
