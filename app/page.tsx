@@ -807,6 +807,13 @@ export default function AppBase() {
   //素材の色選択
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialItem | null>(null);
     
+  type CropRect = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+
   type ImageItem = {
     id: string;
     type: "image";
@@ -817,9 +824,17 @@ export default function AppBase() {
     height: number;
     rotation?: number;
     preview?: string;
+    crop: CropRect;
+    naturalWidth: number;　　//元の画像サイズ（切り取りを戻すのに必要）
+    naturalHeight: number;
+    locked?: boolean;
   };
 
   type CanvasItem = TextItem | ImageItem;
+
+  //背景か素材かのステート
+  const [isAddingBackground, setIsAddingBackground] = useState(false);
+
 
   //レイヤー管理配列
   const [items, setItems] = useState<CanvasItem[]>([]);
@@ -916,14 +931,16 @@ export default function AppBase() {
       return;
     }
 
-    // RGB チェック
     if (!rgb) {
       console.warn("RGB が未定義です");
       return;
     }
 
-    // 色付き素材をキャンバスに描画
-    drawColoredMaterialOnCanvas(selectedMaterial, rgb);
+    // 背景用フラグをセット
+    const isBackground = isAddingBackground; // 事前に true / false をセットしておく
+
+    drawColoredMaterialOnCanvas(selectedMaterial, rgb, isBackground);
+
   };
 
   //文字設定
@@ -973,29 +990,46 @@ export default function AppBase() {
       y: (clientY - rect.top) * scaleY,
     };
   };
-  const [currentMode, setCurrentMode] =
-    useState<"move" | "resize" | "rotate" | null>(null);
+
+  type CurrentMode = "none" | "move" | "resize" | "rotate" | "crop";
+  const [currentMode, setCurrentMode] = useState<CurrentMode>("none");
+  const cropHandleRef = useRef<"top" | "bottom" | "left" | "right" | null>(null);
 
   //回転用の ref
   const startAngleRef = useRef(0);
   const originalRotationRef = useRef(0);
   
   //複製処理関数
-  const duplicateItem = (id: string) => {
-    setItems(prev => {
-      const target = prev.find(i => i.id === id);
-      if (!target) return prev;
+ const duplicateItem = (id: string) => {
+  setItems(prev => {
+    const target = prev.find(i => i.id === id);
+    if (!target) return prev;
 
-      const newItem = {
+    if (target.type === "image") {
+      const newItem: ImageItem = {
         ...target,
         id: crypto.randomUUID(),
         x: target.x + 30,
         y: target.y + 30,
+        crop: { ...target.crop }, // ✅ 必ずある
       };
       return [...prev, newItem];
-    });
-    setSelectedId(null);
-  };
+    }
+
+    // text など他タイプ
+    const newItem: TextItem = {
+      ...target,
+      id: crypto.randomUUID(),
+      x: target.x + 30,
+      y: target.y + 30,
+    };
+
+    return [...prev, newItem];
+  });
+
+  setSelectedId(null);
+};
+
 
   const startXRef = useRef(0);
   const startYRef = useRef(0);
@@ -1008,7 +1042,7 @@ export default function AppBase() {
   const handleWindowPointerUp = () => {
     setIsDragging(false);
     setResizingHandle(null);
-    setCurrentMode(null);
+    setCurrentMode("none");
 
     startXRef.current = 0;
     startYRef.current = 0;
@@ -1028,8 +1062,21 @@ export default function AppBase() {
 
   //回転、複製、削除、拡大縮小ハンドル
   const HANDLE_OFFSET = isMobile ? 70 : 40;
-  //const HANDLE_Y_OFFSET = isMobile ? 70 : 40;
   const　HANDLE_SIZE　= HANDLE_OFFSET / 4
+
+  //crop用の開始時スナップショット
+  type CropStartState = {
+    itemId: string;
+    crop: CropRect;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    mouseX: number;
+    mouseY: number;
+  };
+
+  const cropStartRef = useRef<CropStartState | null>(null);
 
   useEffect(() => {
     const checkMobile = () => setIsMobile(window.innerWidth < 640); // sm未満をスマホとする
@@ -1043,7 +1090,13 @@ export default function AppBase() {
   const handleCanvasMouseDown = (
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
   ) => {
-    e.preventDefault();
+
+
+    if ("touches" in e) {
+      // touch のときは何もしない
+    } else {
+      e.preventDefault();
+    }
 
     const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
@@ -1055,7 +1108,10 @@ export default function AppBase() {
 
     const { x: mouseX, y: mouseY } = getCanvasPos(canvas, e, zoom);
     const item = items.find(i => i.id === selectedId);
+    const active = items.find(i => i.id === selectedId);
 
+    if (!item || (item.type === "image" && item.locked)) return;
+    
     // ====== 1) 回転ハンドル ======
     if (item && getRotateHandleUnderCursor(mouseX, mouseY, item)) {
       setCurrentMode("rotate");
@@ -1119,7 +1175,7 @@ export default function AppBase() {
       if (isDeleteHit) {
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setSelectedId(null);
-        setCurrentMode(null);
+        setCurrentMode("none");
         return;
       }
     }
@@ -1149,7 +1205,43 @@ export default function AppBase() {
 
       if (isDuplicateHit) {
         duplicateItem(item.id);
-        setCurrentMode(null);
+        setCurrentMode("none");
+        return;
+      }
+    }
+
+    // ====== 切り取りハンドル ======
+    const itemCrop = items.find(it => it.id === selectedId);
+
+    if (itemCrop && itemCrop.type === "image") {
+      const crop = itemCrop.crop;
+
+      const cx = itemCrop.x + itemCrop.width / 2;
+      const cy = itemCrop.y + itemCrop.height / 2;
+      const rad = -(itemCrop.rotation ?? 0);
+
+      const dx = mouseX - cx;
+      const dy = mouseY - cy;
+
+      const unrotatedX = dx * Math.cos(rad) - dy * Math.sin(rad) + cx;
+      const unrotatedY = dx * Math.sin(rad) + dy * Math.cos(rad) + cy;
+
+      const handle = getCropHandleUnderCursor(unrotatedX, unrotatedY, itemCrop);
+
+      if (handle) {
+        setCurrentMode("crop");
+        cropHandleRef.current = handle;
+
+        cropStartRef.current = {
+          itemId: itemCrop.id,
+          crop,
+          x: itemCrop.x,
+          y: itemCrop.y,
+          width: itemCrop.width,
+          height: itemCrop.height,
+          mouseX,
+          mouseY,
+        };
         return;
       }
     }
@@ -1172,20 +1264,37 @@ export default function AppBase() {
         return;
       }
     }
+    
+    if (!active) {
+      // active が無い場合は、ここで明示的に終了
+      return;
+    }
 
 
     // ====== 4) 何もクリックしなかった ======
     setSelectedId(null);
-    setCurrentMode(null);
+    setCurrentMode("none");
   };
 
   //ドラッグ中に位置を更新する
   const handleCanvasMouseMove = (
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
   ) => {
-    e.preventDefault();
+    console.log("MOVE", currentMode);
+    if (currentMode === "crop") {
+      console.log("crop move", {
+        handle: cropHandleRef.current,
+        start: cropStartRef.current,
+      });
+    }
 
-    if (!selectedId) return;
+    if ("touches" in e) {
+      // touch のときは何もしない
+    } else {
+      e.preventDefault();
+    }
+
+    if (!selectedId && currentMode !== "crop") return;
 
     const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
@@ -1196,6 +1305,119 @@ export default function AppBase() {
 
     const cx = active.x + active.width / 2;
     const cy = active.y + active.height / 2;
+
+    // ====== クロップ中 ======
+    if (currentMode === "crop") {
+
+      if (!cropStartRef.current || !cropHandleRef.current) return;
+
+      const start = cropStartRef.current;
+      const handle = cropHandleRef.current;
+
+      const dxCanvas = mouseX - start.mouseX;
+      const dyCanvas = mouseY - start.mouseY;
+
+      setItems(prev =>
+        prev.map(item => {
+          if (item.id !== start.itemId) return item;
+          if (item.type !== "image") return item;
+          if (!item.crop) return item;
+
+          console.log("crop move", {
+      id: item.id,
+      isMaterial: true, // 今は概念上
+      crop: item.crop,
+      natural: {
+        w: item.naturalWidth,
+        h: item.naturalHeight,
+      },
+    });
+
+          let x = start.x;
+          let y = start.y;
+          let width = start.width;
+          let height = start.height;
+
+          let crop = { ...start.crop };
+
+          if (handle === "right") {
+      const scale = start.crop.width / start.width;
+
+      // crop が動ける最大量（画像右端まで）
+      const maxCropDx =
+        item.naturalWidth - (start.crop.x + start.crop.width);
+
+      // canvas 側に換算
+      const maxCanvasDx = maxCropDx / scale;
+
+      // 実際に使う dx（clamp）
+      const dx = Math.min(dxCanvas, maxCanvasDx);
+
+      // ===== 枠 =====
+      width = Math.max(20, start.width + dx);
+
+      // ===== crop =====
+      crop.width = Math.max(
+        1,
+        start.crop.width + dx * scale
+      );
+    }
+    if (handle === "left") {
+      const scale = start.crop.width / start.width;
+
+      // crop が左に動ける最大量
+      const maxCropDx = start.crop.x;
+
+      const maxCanvasDx = maxCropDx / scale;
+      const dx = Math.max(dxCanvas, -maxCanvasDx);
+
+      x = start.x + dx;
+      width = Math.max(20, start.width - dx);
+
+      crop.x = start.crop.x + dx * scale;
+      crop.width = start.crop.width - dx * scale;
+    }
+    if (handle === "bottom") {
+      const scale = start.crop.height / start.height;
+
+      const maxCropDy =
+        item.naturalHeight - (start.crop.y + start.crop.height);
+
+      const maxCanvasDy = maxCropDy / scale;
+      const dy = Math.min(dyCanvas, maxCanvasDy);
+
+      height = Math.max(20, start.height + dy);
+
+      crop.height = start.crop.height + dy * scale;
+    }
+    if (handle === "top") {
+      const scale = start.crop.height / start.height;
+
+      const maxCropDy = start.crop.y;
+      const maxCanvasDy = maxCropDy / scale;
+      const dy = Math.max(dyCanvas, -maxCanvasDy);
+
+      y = start.y + dy;
+      height = Math.max(20, start.height - dy);
+
+      crop.y = start.crop.y + dy * scale;
+      crop.height = start.crop.height - dy * scale;
+    }
+
+
+          return {
+            ...item,
+            x,
+            y,
+            width,
+            height,
+            crop,
+          };
+        })
+      );
+
+      return;
+    }
 
     // ====== 回転中 ======
     if (currentMode === "rotate") {
@@ -1210,41 +1432,82 @@ export default function AppBase() {
 
     /// ====== リサイズ中 ======
     if (currentMode === "resize") {
-      const lp = toLocalPoint(mouseX, mouseY, active);
+  const lp = toLocalPoint(mouseX, mouseY, active);
 
-      let newW = active.width;
-      let newH = active.height;
-      let newX = active.x;
-      let newY = active.y;
+  const aspect = active.width / active.height;
 
-      // ---- 横方向 ----
-      if (resizeDirX === "r") {
-        newW = Math.max(20, lp.x); 
-      } 
-      else if (resizeDirX === "l") {
-        newW = Math.max(20, active.width - lp.x);
-        newX = active.x + (active.width - newW);
-      }
+  let newW = active.width;
+  let newH = active.height;
+  let newX = active.x;
+  let newY = active.y;
 
-      // ---- 縦方向 ----
-      if (resizeDirY === "b") {
-        newH = Math.max(20, lp.y);
-      }
-      else if (resizeDirY === "t") {
-        newH = Math.max(20, active.height - lp.y);
-        newY = active.y + (active.height - newH);
-      }
+  const minSize = 20;
 
-      setItems(prev =>
-        prev.map(it =>
-          it.id === active.id
-            ? { ...it, width: newW, height: newH, x: newX, y: newY }
-            : it
-        )
-      );
+  const hasX = resizeDirX !== null;
+  const hasY = resizeDirY !== null;
 
-      return;
-    } 
+  // ===== 基準方向を決める =====
+  if (hasX && !hasY) {
+    // 横だけ動かしている → 幅基準
+    if (resizeDirX === "r") {
+      newW = Math.max(minSize, lp.x);
+    } else {
+      newW = Math.max(minSize, active.width - lp.x);
+      newX = active.x + (active.width - newW);
+    }
+    newH = newW / aspect;
+  }
+
+  else if (!hasX && hasY) {
+    // 縦だけ → 高さ基準
+    if (resizeDirY === "b") {
+      newH = Math.max(minSize, lp.y);
+    } else {
+      newH = Math.max(minSize, active.height - lp.y);
+      newY = active.y + (active.height - newH);
+    }
+    newW = newH * aspect;
+  }
+
+  else if (hasX && hasY) {
+    // コーナー → 動いた量が大きい方を基準
+    const dw =
+      resizeDirX === "r"
+        ? lp.x
+        : active.width - lp.x;
+
+    const dh =
+      resizeDirY === "b"
+        ? lp.y
+        : active.height - lp.y;
+
+    if (Math.abs(dw) > Math.abs(dh)) {
+      newW = Math.max(minSize, dw);
+      newH = newW / aspect;
+    } else {
+      newH = Math.max(minSize, dh);
+      newW = newH * aspect;
+    }
+
+    if (resizeDirX === "l") {
+      newX = active.x + (active.width - newW);
+    }
+    if (resizeDirY === "t") {
+      newY = active.y + (active.height - newH);
+    }
+  }
+
+  setItems(prev =>
+    prev.map(it =>
+      it.id === active.id
+        ? { ...it, width: newW, height: newH, x: newX, y: newY }
+        : it
+    )
+  );
+
+  return;
+}
+
 
     // ====== 移動中 ======
     if (currentMode === "move" && dragOffsetLocal) {
@@ -1288,7 +1551,7 @@ export default function AppBase() {
 
     setIsDragging(false);
     setResizingHandle(null);
-    setCurrentMode(null);
+    setCurrentMode("none");
 
     // 特にリセットする必要はないが一応
     startXRef.current = 0;
@@ -1338,7 +1601,6 @@ export default function AppBase() {
     const cx = item.x + item.width / 2;
     const cy = item.y + item.height / 2;
 
-    // ここはもう回転済みの空間なので rotate はしない！
     const handleX = cx;
     const handleY = cy - (item.height / 2 + HANDLE_OFFSET);
 
@@ -1350,8 +1612,6 @@ export default function AppBase() {
 
   //複製描画関数
   const drawCopyHandle = (ctx: CanvasRenderingContext2D, item: CanvasItem) => {
-    // ======== 複製ボタン（＋）を描画 ========
-        //const duplicateVisualSize = 20;
 
         // 🔽 回転ノブの「左隣」に配置
         const duplicateX = item.x + item.width / 2 - 40 - HANDLE_OFFSET;
@@ -1386,6 +1646,57 @@ export default function AppBase() {
         ctx.fillText("×", deleteX, deleteY);
   };
 
+  //切り取り描画関数（サブ）
+  function drawRoundedRect(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number
+  ) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+
+  //切り取り描画関数（メイン）
+
+  const CROP_HANDLE_WIDTH = HANDLE_OFFSET/2;
+  const CROP_HANDLE_HEIGHT = HANDLE_OFFSET /4;
+  const CROP_HANDLE_RADIUS = 3;
+
+  function drawCropHandles(ctx: CanvasRenderingContext2D, item: CanvasItem) {
+  const cx = item.x + item.width / 2;
+  const cy = item.y + item.height / 2;
+
+  const handles = [
+    { x: cx, y: item.y, w: CROP_HANDLE_WIDTH, h: CROP_HANDLE_HEIGHT }, // top
+    { x: cx, y: item.y + item.height, w: CROP_HANDLE_WIDTH, h: CROP_HANDLE_HEIGHT }, // bottom
+    { x: item.x, y: cy, w: CROP_HANDLE_HEIGHT, h: CROP_HANDLE_WIDTH }, // left
+    { x: item.x + item.width, y: cy, w: CROP_HANDLE_HEIGHT, h: CROP_HANDLE_WIDTH }, // right
+  ];
+
+  ctx.fillStyle = "#000";
+  handles.forEach(h => {
+    const x = h.x - h.w / 2;
+    const y = h.y - h.h / 2;
+
+    drawRoundedRect(ctx, x, y, h.w, h.h, CROP_HANDLE_RADIUS);
+    ctx.fill();
+  });
+}
+
+
   const getRotateHandleUnderCursor = (
     mouseX: number,
     mouseY: number,
@@ -1395,13 +1706,16 @@ export default function AppBase() {
     const cy = item.y + item.height / 2;
     const rad = item.rotation ?? 0;
 
+    //ノブの位置（回転前）
     const rawX = item.x + item.width / 2;
     const rawY = item.y - HANDLE_OFFSET;
 
+    //ノブの位置（回転後）
     const pos = rotatePoint(rawX, rawY, cx, cy, rad);
 
+    //あたり判定
     const dist = Math.hypot(mouseX - pos.x, mouseY - pos.y);
-    return dist <= HANDLE_SIZE + HANDLE_OFFSET;
+    return dist <= HANDLE_SIZE;
   };
 
   const [dragOffsetLocal, setDragOffsetLocal] = useState<{ x: number; y: number } | null>(null);
@@ -1476,25 +1790,41 @@ export default function AppBase() {
     const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
     if (!canvas) return;
 
-    // ✅ 今の選択状態を一時保存
+    // 今の選択状態を一時保存
     const prevSelectedId = selectedId;
 
-    // ✅ 選択解除（＝青枠を消す）
+    // 選択解除（青枠を消す）
     setSelectedId(null);
 
-    // ✅ 1フレーム待ってから保存（再描画が反映されてから）
     requestAnimationFrame(() => {
-      const dataUrl = canvas.toDataURL("image/png");
+      // スマホ・高解像度対応用の一時 Canvas を作成
+      const scale = window.devicePixelRatio || 1;
+      const tmpCanvas = document.createElement("canvas");
+      tmpCanvas.width = canvas.width * scale;
+      tmpCanvas.height = canvas.height * scale;
+
+      const ctx = tmpCanvas.getContext("2d");
+      if (!ctx) return;
+
+      // スケールを反映
+      ctx.scale(scale, scale);
+
+      // 元の Canvas の内容を描画
+      ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height);
+
+      // PNG 形式で保存（画質劣化なし）
+      const dataUrl = tmpCanvas.toDataURL("image/png");
 
       const link = document.createElement("a");
       link.href = dataUrl;
       link.download = "hokurochan.png";
       link.click();
 
-      // ✅ 選択状態を元に戻す
+      // 選択状態を元に戻す
       setSelectedId(prevSelectedId);
     });
   };
+
 
   // --- フッター内に入れたいポップアップを操作する state ---
   const [popup, setPopup] = useState<"guide" | "terms" | "instagram" | null>(null);
@@ -1588,7 +1918,25 @@ export default function AppBase() {
           ctx.translate(-cx, -cy);
 
           // ★ 回転させた状態で画像描画
-          ctx.drawImage(img, item.x, item.y, item.width, item.height);
+          const crop = item.crop ?? {
+            x: 0,
+            y: 0,
+            width: img.naturalWidth,
+            height: img.naturalHeight,
+          };
+
+          ctx.drawImage(
+            img,
+            crop.x,
+            crop.y,
+            crop.width,
+            crop.height,
+            item.x,
+            item.y,
+            item.width,
+            item.height
+          );
+
 
           // ✅ 次の描画に影響しないよう戻す（超重要）
           ctx.globalAlpha = 1;
@@ -1619,11 +1967,14 @@ export default function AppBase() {
         if (item.type !== "text") {
           drawResizeHandles(ctx, item);
         }
+
+        if (item.type === "image") {
+          drawCropHandles(ctx, item);
+        }
+
         drawRotateHandle(ctx, item);
         drawCopyHandle(ctx, item);
         drawDeleteHandle(ctx, item);
-
-        
 
         // ========= 回転終了 =========
         ctx.restore();
@@ -1651,8 +2002,7 @@ export default function AppBase() {
     // =========================
     // ✅ 素材パネル 初期化
     // =========================
-    if (activePanel === "素材") {
-      // カテゴリを最初に戻したいならここも
+    if (activePanel === "素材" ||activePanel === "背景") {
       setSelectedCategory(categories[0].id); 
       setSelectedMaterial(null);
     }
@@ -1714,7 +2064,7 @@ export default function AppBase() {
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (items.length > 0) {
-        saveCanvasToLocalStorage();
+        //saveCanvasToLocalStorage();
       }
     };
 
@@ -1780,10 +2130,20 @@ export default function AppBase() {
         width: img.width * scale,
         height: img.height * scale,
         rotation: 0,
+        naturalWidth: img.width,
+        naturalHeight: img.height,
+        crop: {
+          x: 0,
+          y: 0,
+          width: img.width,
+          height: img.height,
+        },
       };
       setItems(prev => [...prev, newImageItem]);
     };
   }
+
+
     
   function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
@@ -1803,7 +2163,11 @@ export default function AppBase() {
 
 
   //色付き素材を描画する関数
-  function drawColoredMaterialOnCanvas(material?: MaterialItem, rgb?: RGB) {
+  function drawColoredMaterialOnCanvas(
+    material?: MaterialItem,
+    rgb?: RGB,
+    isBackground: boolean = false
+  ) {
     if (!material || !material.layers?.line || !material.layers?.fill || !rgb) return;
 
     const canvas = isMobile ? spCanvasRef.current : pcCanvasRef.current;
@@ -1821,7 +2185,7 @@ export default function AppBase() {
         img.src = src;
       });
 
-      (async () => {
+    (async () => {
       try {
         const lineImg = await loadImage(material.layers.line);
         const fillImg = await loadImage(material.layers.fill);
@@ -1843,30 +2207,55 @@ export default function AppBase() {
         tempCtx.drawImage(lineImg, 0, 0);
 
         const dataURL = tempCanvas.toDataURL();
-        const scale = 0.2;
+
+        const scale = isBackground
+          ? Math.max(canvas.width / w, canvas.height / h) // 余白なし
+          : 0.2;
 
         const newItem: ImageItem = {
           id: crypto.randomUUID(),
           type: "image",
           src: dataURL,
-          x: canvas.width / 2 - (w * scale) / 2,
-          y: canvas.height / 2 - (h * scale) / 2,
-          width: w * scale,
-          height: h * scale,
+          x: isBackground ? 0 : canvas.width / 2 - (w * scale) / 2,
+          y: isBackground ? 0 : canvas.height / 2 - (h * scale) / 2,
+          width: isBackground ? canvas.width : w * scale,
+          height: isBackground ? canvas.height : h * scale,
           rotation: 0,
+          naturalWidth: w,
+          naturalHeight: h,
+          crop: {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+          },
+          locked: isBackground, // 背景固定
         };
 
-        // 1回目から描画されるようにキャッシュに入れる
+        // キャッシュ登録
         const img = new Image();
         img.src = newItem.src;
         imageCache.current[newItem.id] = img;
 
-        setItems(prev => [...prev, newItem]);
+        setItems(prev =>
+          isBackground
+            ? [
+                newItem, // 新しい背景を先頭に
+                ...prev.filter(
+                  (item): item is ImageItem => item.type === "image" && !(item as any).locked
+                ), // 既存の背景は削除
+              ]
+            : [...prev, newItem]
+        );
+
+
       } catch (e) {
         console.error("画像の読み込みに失敗しました", e);
       }
-   })();
-  } 
+    })();
+  }
+
+
 
   //逆回転してマウス座標を補正する関数
   function toLocalPoint(mouseX: number, mouseY: number, item: CanvasItem) {
@@ -1944,10 +2333,35 @@ export default function AppBase() {
     };
   }
 
+  // 切り取りノブのあたり判定
+  const HANDLE_OFFSET_crop = isMobile ? 70 : 60;
+  function getCropHandleUnderCursor(
+    mouseX: number,
+    mouseY: number,
+    item: CanvasItem
+  ): "top" | "bottom" | "left" | "right" | null {
+    const handles = [
+      { type: "top", x: item.x + item.width / 2, y: item.y },
+      { type: "bottom", x: item.x + item.width / 2, y: item.y + item.height },
+      { type: "left", x: item.x, y: item.y + item.height / 2 },
+      { type: "right", x: item.x + item.width, y: item.y + item.height / 2 },
+    ] as const;
+
+    for (const h of handles) {
+      if (
+        Math.abs(mouseX - h.x) < HANDLE_OFFSET_crop &&
+        Math.abs(mouseY - h.y) < HANDLE_OFFSET_crop
+      ) {
+        return h.type;
+      }
+    }
+    return null;
+  }
+
+
   //背景透過関数
   async function handleRemoveBackground(imageSrc: string) {
     try {
-      //console.log("✅ 背景透過 開始");
       setIsRemovingBg(true); // ← ボタン切り替え開始
 
       const response = await fetch(imageSrc);
@@ -1995,7 +2409,7 @@ export default function AppBase() {
   }
 
   //ファイル保存用
-  function saveCanvasToLocalStorage() {
+  /*function saveCanvasToLocalStorage() {
     const raw = localStorage.getItem("my-canvas-save-list");
     const list: StoredCanvas[] = raw ? JSON.parse(raw) : [];
 
@@ -2033,7 +2447,8 @@ export default function AppBase() {
       //console.log("✅ 保存成功:", newData);
       return [newData, ...prev]; // 新しいのを先頭に追加
     });
-  };
+  };*/
+
 
   return (
     <>
@@ -2056,12 +2471,13 @@ export default function AppBase() {
               <nav className="w-40 bg-pink-100 border-r border-pink-200 p-3 flex flex-col gap-3">
                 {[
                   "新規ファイル",
-                  "保存ファイル",
+                  /* "保存ファイル", */
                   "キャンパスサイズ",
                   "画像",
                   "素材",
                   "文字",
                   "レイヤー",
+                  "背景",
                 ].map((label: string) => (
                   <button
                     key={label}
@@ -2069,21 +2485,22 @@ export default function AppBase() {
                       setActivePanel(label);
     
                       if (label === "新規ファイル") {
-                        // ✅ アイテムが1つ以上あるときだけ保存＆通知
-                        if (items.length > 0) {
-                          saveCanvasToLocalStorage();
-                          alert("前の編集内容は自動保存されました。\n保存ファイルから確認できます！");
-                        } else{
-                          alert("新しいファイルになりました！");
-                        }
-                          saveCanvas();
-                          clearCanvas();
-                          setItems([]);           // ✅ これ超重要（描画の元データを消す）
-                          setSelectedId(null);   // ✅ 選択状態もリセット
-                          setActivePanel(null);
-                          setPanelOpen(false);
+                        const ok = window.confirm(
+                          "新しいファイルを作成します。\n現在のキャンパス内容はリセットされます。\n\nよろしいですか？"
+                        );
+
+                        if (!ok) return;
+
+                        // 新しいキャンパスにする
+                        clearCanvas();
+                        setItems([]);
+                        setSelectedId(null);
+                        setActivePanel(null);
+                        setPanelOpen(false);
+
+                        alert("新しいファイルになりました！");
                         return;
-                      }  
+                      }
                       setPanelOpen(true);
                     }}
                     className="w-full py-2 bg-pink-300 rounded-2xl text-sm shadow hover:bg-pink-400 transition"
@@ -2113,9 +2530,8 @@ export default function AppBase() {
                   </div>
     
                   <div className="flex-1 p-4 overflow-y-auto text-sm">
-                    {activePanel === "保存ファイル" && (
+                    {/*{activePanel === "保存ファイル" && (
                     <>
-                      {/* ✅ デバッグ表示 */}
                       <div className="text-xs text-gray-500">
                         保存数：{savedList.length}
                       </div>
@@ -2161,7 +2577,7 @@ export default function AppBase() {
                         </div>
                       )}
                     </>
-                  )}
+                  )}*/}
          
                   {activePanel === "キャンパスサイズ" && (
                     <>
@@ -2349,6 +2765,7 @@ export default function AppBase() {
                             onClick={() => {
                               setSelectedCategory(cat.id);
                               setSelectedMaterial(null); // ← 戻った時に素材も解除できるように
+                              setIsAddingBackground(false);
                             }}
                             className={`p-2 rounded-lg shadow-sm transition ${
                               selectedCategory === cat.id
@@ -2383,7 +2800,10 @@ export default function AppBase() {
                                     src={material.thumbnail}
                                     alt={material.name}
                                     className="cursor-pointer hover:opacity-80"
-                                    onClick={() => setSelectedMaterial(material)} // ← 素材選択
+                                    onClick={() => {
+                                      setIsAddingBackground(false);   // ← ★ 背景モードOFF
+                                      setSelectedMaterial(material);
+                                    }}
                                   />
                                 )
                               )}
@@ -2470,6 +2890,46 @@ export default function AppBase() {
                         ))}
                     </div>
                   )}
+                  {/* 背景 */}
+                  {activePanel === "背景" && (
+                    <div className="h-full p-3 overflow-auto">
+
+                      <p className="text-lg font-bold mb-2">
+                        柄もの
+                      </p>
+
+                      {/* ===== 素材一覧（常に表示） ===== */}
+                      {!selectedMaterial && (
+                        <div className="grid grid-cols-3 gap-2">
+                          {materialsByCategory["pattern"]?.map(
+                            (material: MaterialItem) => (
+                              <img
+                                key={material.id}
+                                src={material.thumbnail}
+                                alt={material.name}
+                                className="cursor-pointer hover:opacity-80 rounded"
+                                onClick={() => {
+                                  setIsAddingBackground(true);   // ← ★ 背景モードON
+                                  setSelectedMaterial(material);
+                                }}
+                              />
+                            )
+                          )}
+                        </div>
+                      )}
+
+                      {/* ===== カラー変更画面 ===== */}
+                      {selectedMaterial && (
+                        <ColorPickerPanel
+                          selectedMaterial={selectedMaterial}
+                          onConfirm={handleColorConfirm}
+                          onBack={() => setSelectedMaterial(null)}
+                        />
+                      )}
+                    </div>
+                  )}
+
+
                 </div>
          
                 {/* リサイズバー */}
@@ -2753,6 +3213,7 @@ export default function AppBase() {
             "素材",
             "文字",
             "レイヤー",
+            "背景",
           ].map((label: string) => (
             <button
               key={label}
@@ -2760,18 +3221,20 @@ export default function AppBase() {
                 setActivePanel(label);
 
                 if (label === "新規ファイル") {
-                  if (items.length > 0) {
-                    saveCanvasToLocalStorage();
-                    alert("前の編集内容は自動保存されました。\n保存ファイルから確認できます！");
-                  } else {
-                    alert("新しいファイルになりました！");
-                  }
-                  saveCanvas();
+                  const ok = window.confirm(
+                    "新しいファイルを作成します。\n現在のキャンパス内容はリセットされます。\n\nよろしいですか？"
+                  );
+
+                  if (!ok) return;
+
+                  // 新しいキャンパスにする
                   clearCanvas();
                   setItems([]);
                   setSelectedId(null);
                   setActivePanel(null);
                   setPanelOpen(false);
+
+                  alert("新しいファイルになりました！");
                   return;
                 }
                 setPanelOpen(true);
@@ -2881,9 +3344,8 @@ export default function AppBase() {
               </button>
             </div>
               <div className="flex-1 p-4 overflow-y-auto text-sm">
-              {activePanel === "保存ファイル" && (
-              <>
-                {/* ✅ デバッグ表示 */}
+              {/*{activePanel === "保存ファイル" && (
+              <> 
                 <div className="text-xs text-gray-500">
                   保存数：{savedList.length}
                 </div>
@@ -2931,7 +3393,7 @@ export default function AppBase() {
                   </div>
                 )}
               </>
-            )}
+            )}*/}
 
             {activePanel === "キャンパスサイズ" && (
               <div className="flex-1 p-4 overflow-auto">
@@ -3163,7 +3625,10 @@ export default function AppBase() {
                               src={material.thumbnail}
                               alt={material.name}
                               className="cursor-pointer hover:opacity-80"
-                              onClick={() => setSelectedMaterial(material)} // ← 素材選択
+                              onClick={() => {
+                                setIsAddingBackground(false);   // ← ★ 背景モードOFF
+                                setSelectedMaterial(material);
+                              }}
                             />
                           )
                         )}
@@ -3266,6 +3731,48 @@ export default function AppBase() {
                 ))}
               </div>
             )}
+             {/* 背景 */}
+                  {activePanel === "背景" && (
+                    <div className="h-full p-3 overflow-auto">
+
+                      <p className="text-lg font-bold mb-2">
+                        柄もの
+                      </p>
+
+                      {/* ===== 素材一覧（常に表示） ===== */}
+                      {!selectedMaterial && (
+                        <div className="grid grid-cols-3 gap-2">
+                          {materialsByCategory["pattern"]?.map(
+                            (material: MaterialItem) => (
+                              <img
+                                key={material.id}
+                                src={material.thumbnail}
+                                alt={material.name}
+                                className="cursor-pointer hover:opacity-80 rounded"
+                                onClick={() => {
+                                  setIsAddingBackground(true);   // ← ★ 背景モードON
+                                  setSelectedMaterial(material);
+                                }}
+                              />
+                            )
+                          )}
+                        </div>
+                      )}
+
+                      {/* ===== カラー変更画面 ===== */}
+                      {selectedMaterial && (
+                        <ColorPickerPanel
+                          selectedMaterial={selectedMaterial}
+                          onConfirm={(finalMaterial) => {
+                            handleColorConfirm(finalMaterial);
+                            setActivePanel(null);
+                            setPanelOpen(false);
+                          }}
+                          onBack={() => setSelectedMaterial(null)}
+                        />
+                      )}
+                    </div>
+                  )}
           </div>
         
           {/* リサイズバー */}
