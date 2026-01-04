@@ -1091,7 +1091,6 @@ export default function AppBase() {
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
   ) => {
 
-
     if ("touches" in e) {
       // touch のときは何もしない
     } else {
@@ -1110,7 +1109,7 @@ export default function AppBase() {
     const item = items.find(i => i.id === selectedId);
     const active = items.find(i => i.id === selectedId);
 
-    if (!item || (item.type === "image" && item.locked)) return;
+    //if (!item || (item.type === "image" && item.locked)) return;
     
     // ====== 1) 回転ハンドル ======
     if (item && getRotateHandleUnderCursor(mouseX, mouseY, item)) {
@@ -3207,7 +3206,7 @@ export default function AppBase() {
           >
           {[
             "新規ファイル",
-            "保存ファイル",
+            /*"保存ファイル",*/
             "キャンパスサイズ",
             "画像",
             "素材",
